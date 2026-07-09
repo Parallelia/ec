@@ -170,8 +170,8 @@ All messages are JSON, wrapped in NIP-59 Gift Wrap.
 ### Voter → EC
 
 ```json
-// Register
-{ "action": "register", "election_id": "abc123", "registration_token": "base64..." }
+// Register (request_id is optional in every action; the EC echoes it in the reply)
+{ "action": "register", "election_id": "abc123", "registration_token": "base64...", "request_id": "hex..." }
 
 // Request blind-signed token
 { "action": "request-token", "election_id": "abc123", "blinded_nonce": "base64..." }
@@ -186,13 +186,13 @@ All messages are JSON, wrapped in NIP-59 Gift Wrap.
 ### EC → Voter (replies via Gift Wrap to sender's pubkey)
 
 ```json
-// Success
-{ "status": "ok", "action": "register-confirmed" }
+// Success (request_id echoed when the request carried one)
+{ "status": "ok", "action": "register-confirmed", "request_id": "hex..." }
 { "status": "ok", "action": "token-issued", "blind_signature": "base64..." }
 { "status": "ok", "action": "vote-recorded" }
 
-// Errors
-{ "status": "error", "code": "INVALID_TOKEN", "message": "..." }
+// Errors (request_id echoed when the request carried one)
+{ "status": "error", "code": "INVALID_TOKEN", "message": "...", "request_id": "hex..." }
 { "status": "error", "code": "ALREADY_REGISTERED", "message": "..." }
 { "status": "error", "code": "NOT_AUTHORIZED", "message": "..." }
 { "status": "error", "code": "NONCE_ALREADY_USED", "message": "..." }

@@ -214,6 +214,8 @@ The full proto definition is at [`proto/admin/admin.proto`](proto/admin/admin.pr
 
 All voter-EC communication is JSON inside NIP-59 Gift Wrap events (encrypted, sender-anonymous).
 
+Every request may include an optional `request_id` (client-generated random string, max 64 chars). The EC echoes it verbatim in the reply — success or error — so clients can match responses to in-flight requests and ignore Gift Wraps replayed by relays. Requests without a `request_id` get replies without one.
+
 ### Voter → EC
 
 **Register** (use the token received from the operator):
@@ -222,7 +224,8 @@ All voter-EC communication is JSON inside NIP-59 Gift Wrap events (encrypted, se
 {
   "action": "register",
   "election_id": "abc123",
-  "registration_token": "base64url_token_here"
+  "registration_token": "base64url_token_here",
+  "request_id": "random_hex_string"
 }
 ```
 
@@ -257,16 +260,18 @@ The `token` field is the base64-encoded concatenation of the unblinded RSA signa
 **Success responses:**
 
 ```json
-{ "status": "ok", "action": "register-confirmed" }
-{ "status": "ok", "action": "token-issued", "blind_signature": "base64..." }
-{ "status": "ok", "action": "vote-recorded" }
+{ "status": "ok", "action": "register-confirmed", "request_id": "echoed..." }
+{ "status": "ok", "action": "token-issued", "blind_signature": "base64...", "request_id": "echoed..." }
+{ "status": "ok", "action": "vote-recorded", "request_id": "echoed..." }
 ```
 
 **Error responses:**
 
 ```json
-{ "status": "error", "code": "ERROR_CODE", "message": "Human-readable description" }
+{ "status": "error", "code": "ERROR_CODE", "message": "Human-readable description", "request_id": "echoed..." }
 ```
+
+`request_id` is present only when the request carried one.
 
 | Error Code | Meaning |
 |---|---|

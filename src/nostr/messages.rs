@@ -34,6 +34,8 @@ pub struct OkResponse {
     pub action: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blind_signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -41,6 +43,24 @@ pub struct ErrorResponse {
     pub status: &'static str,
     pub code: &'static str,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+}
+
+/// Longest `request_id` the EC will echo back. Anything larger is treated as
+/// absent rather than reflected into the reply.
+pub const MAX_REQUEST_ID_LEN: usize = 64;
+
+/// Best-effort extraction of the voter-supplied `request_id` from the raw
+/// rumor content. Works on any JSON object, even when the message fails to
+/// parse as a known action, so INVALID_MESSAGE errors stay correlatable.
+pub fn extract_request_id(content: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(content).ok()?;
+    value
+        .get("request_id")?
+        .as_str()
+        .filter(|id| id.len() <= MAX_REQUEST_ID_LEN)
+        .map(String::from)
 }
 
 impl OutboundMessage {
@@ -49,6 +69,7 @@ impl OutboundMessage {
             status: "ok",
             action,
             blind_signature: None,
+            request_id: None,
         })
     }
 
@@ -57,6 +78,7 @@ impl OutboundMessage {
             status: "ok",
             action,
             blind_signature: Some(blind_signature),
+            request_id: None,
         })
     }
 
@@ -65,6 +87,18 @@ impl OutboundMessage {
             status: "error",
             code,
             message: message.into(),
+            request_id: None,
         })
+    }
+
+    /// Stamp the voter-supplied `request_id` onto this reply so the client
+    /// can correlate it with its in-flight request. Handlers stay unaware of
+    /// correlation; the listener applies this just before sending.
+    pub fn with_request_id(mut self, request_id: Option<String>) -> Self {
+        match &mut self {
+            Self::Ok(ok) => ok.request_id = request_id,
+            Self::Error(err) => err.request_id = request_id,
+        }
+        self
     }
 }
