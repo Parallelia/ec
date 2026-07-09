@@ -214,7 +214,7 @@ The full proto definition is at [`proto/admin/admin.proto`](proto/admin/admin.pr
 
 All voter-EC communication is JSON inside NIP-59 Gift Wrap events (encrypted, sender-anonymous).
 
-Every request may include an optional `request_id` (client-generated random string, max 64 chars). The EC echoes it verbatim in the reply — success or error — so clients can match responses to in-flight requests and ignore Gift Wraps replayed by relays. Requests without a `request_id` get replies without one.
+Every request may include an optional `request_id` (client-generated random string, max 64 bytes). The EC echoes it verbatim in the reply — success or error — so clients can match responses to in-flight requests and ignore Gift Wraps replayed by relays. Requests without a `request_id` get replies without one.
 
 ### Voter → EC
 

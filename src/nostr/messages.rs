@@ -51,16 +51,20 @@ pub struct ErrorResponse {
 /// absent rather than reflected into the reply.
 pub const MAX_REQUEST_ID_LEN: usize = 64;
 
-/// Best-effort extraction of the voter-supplied `request_id` from the raw
-/// rumor content. Works on any JSON object, even when the message fails to
-/// parse as a known action, so INVALID_MESSAGE errors stay correlatable.
-pub fn extract_request_id(content: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(content).ok()?;
+/// Best-effort extraction of the voter-supplied `request_id` from an already
+/// parsed JSON value. Works on any JSON object, even when the message fails
+/// to parse as a known action, so INVALID_MESSAGE errors stay correlatable.
+pub fn request_id_from_value(value: &serde_json::Value) -> Option<String> {
     value
         .get("request_id")?
         .as_str()
         .filter(|id| id.len() <= MAX_REQUEST_ID_LEN)
         .map(String::from)
+}
+
+/// [`request_id_from_value`] over raw rumor content.
+pub fn extract_request_id(content: &str) -> Option<String> {
+    request_id_from_value(&serde_json::from_str(content).ok()?)
 }
 
 impl OutboundMessage {
