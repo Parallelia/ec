@@ -53,9 +53,7 @@ impl Admin for AdminService {
         // Validate time constraints
         let now = chrono::Utc::now().timestamp();
         if req.start_time < now {
-            return Err(Status::invalid_argument(
-                "start_time must be in the future",
-            ));
+            return Err(Status::invalid_argument("start_time must be in the future"));
         }
         if req.end_time <= req.start_time {
             return Err(Status::invalid_argument(
@@ -97,9 +95,7 @@ impl Admin for AdminService {
 
         // Re-check: keypair generation may have taken enough time for start_time to lapse.
         if election.start_time < chrono::Utc::now().timestamp() {
-            return Err(Status::invalid_argument(
-                "start_time must be in the future",
-            ));
+            return Err(Status::invalid_argument("start_time must be in the future"));
         }
 
         let sk_secret = SecretString::new(sk_b64.into_boxed_str());
@@ -164,16 +160,12 @@ impl Admin for AdminService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         if let Some(election) = election {
-            let candidates =
-                db::get_candidates_for_election(&self.pool, &candidate.election_id)
+            let candidates = db::get_candidates_for_election(&self.pool, &candidate.election_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            if let Err(e) =
+                nostr::publisher::publish_election_event(&self.nostr_client, &election, &candidates)
                     .await
-                    .map_err(|e| Status::internal(e.to_string()))?;
-            if let Err(e) = nostr::publisher::publish_election_event(
-                &self.nostr_client,
-                &election,
-                &candidates,
-            )
-            .await
             {
                 tracing::warn!(
                     election_id = %election.id,
@@ -207,6 +199,33 @@ impl Admin for AdminService {
         }
 
         tracing::info!(election_id = %election_id, "Election cancelled");
+
+        // Re-publish the announcement so relay clients see the cancelled status.
+        match db::get_election(&self.pool, election_id).await {
+            Ok(Some(election)) => {
+                let candidates = db::get_candidates_for_election(&self.pool, election_id)
+                    .await
+                    .unwrap_or_default();
+                if let Err(e) = nostr::publisher::publish_election_event(
+                    &self.nostr_client,
+                    &election,
+                    &candidates,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        election_id = %election_id,
+                        error = %e,
+                        "Failed to re-publish cancelled election announcement"
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(election_id = %election_id, error = %e, "Failed to reload election after cancel");
+            }
+        }
+
         Ok(Response::new(StatusResponse {
             success: true,
             message: "Election cancelled".to_string(),
@@ -255,11 +274,17 @@ impl Admin for AdminService {
             )));
         }
 
-        // Validate election exists
-        db::get_election(&self.pool, &req.election_id)
+        // Validate election exists and can still enroll voters
+        let election = db::get_election(&self.pool, &req.election_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("Election not found"))?;
+
+        if election.status != "open" && election.status != "in_progress" {
+            return Err(Status::failed_precondition(
+                "Election is not accepting registrations (finished or cancelled)",
+            ));
+        }
 
         // Generate random tokens
         let tokens: Vec<String> = (0..req.count)

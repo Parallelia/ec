@@ -18,6 +18,8 @@ pub struct Config {
     // --- From env vars (secrets) ---
     pub nostr_private_key: SecretString,
     pub db_password: Option<SecretString>,
+    /// Bearer token required on every gRPC admin call when set.
+    pub admin_token: Option<SecretString>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -74,8 +76,12 @@ impl Config {
         let db_password = std::env::var("EC_DB_PASSWORD")
             .ok()
             .map(|s| SecretString::new(s.into_boxed_str()));
+        let admin_token = std::env::var("EC_ADMIN_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| SecretString::new(s.into_boxed_str()));
 
-        let config = Self {
+        Ok(Self {
             relay_url,
             grpc_bind,
             rules_dir,
@@ -83,17 +89,8 @@ impl Config {
             db_path,
             nostr_private_key,
             db_password,
-        };
-
-        tracing::info!(
-            relay_url = %config.relay_url,
-            grpc_bind = %config.grpc_bind,
-            rules_dir = %config.rules_dir.display(),
-            db_path = %config.db_path,
-            "Configuration loaded"
-        );
-
-        Ok(config)
+            admin_token,
+        })
     }
 
     fn load_toml(path: &str) -> Result<FileConfig> {
