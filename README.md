@@ -1,11 +1,11 @@
-# Criptocracia EC — Electoral Commission Daemon
+# Parallelia EC — Electoral Commission Daemon
 
 > **EXPERIMENTAL SOFTWARE — NOT FOR PRODUCTION USE.**
 > This code has **not** been audited and **must not** be used for real-world elections or any scenario where safety, legality, or physical risk is at stake.
 
 ## Overview
 
-Criptocracia EC (`ec`) is the **Electoral Commission daemon** for the Criptocracia voting system — an experimental, trustless, open-source electronic voting platform built in Rust.
+Parallelia EC (`ec`) is the **Electoral Commission daemon** for the Parallelia voting system — an experimental, trustless, open-source electronic voting platform built in Rust.
 
 It is responsible for:
 
@@ -33,7 +33,7 @@ sudo apt install -y cmake build-essential libsqlite3-dev pkg-config libssl-dev p
 ### Build
 
 ```bash
-git clone https://github.com/kriptocracia/ec.git
+git clone https://github.com/parallelia/ec.git
 cd ec
 cargo build
 ```
@@ -475,7 +475,8 @@ Data is persisted in Docker volumes (`ec-data`, `relay-data`).
 
 ## Related Projects
 
-- [Criptocracia MVP](https://github.com/kriptocracia/criptocracia) — original prototype with EC + voter client
+- [Criptocracia MVP](https://github.com/parallelia/criptocracia) — the original prototype (EC + voter client) that this project grew out of; since renamed **Parallelia**
+- [Parallelia Voter](https://github.com/parallelia/voter) — the TUI voting client for this EC
 
 **This repository is experimental and unaudited. Use it only for research, testing, and education.**
 

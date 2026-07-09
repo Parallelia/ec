@@ -34,7 +34,7 @@ description = "The candidate with the most votes wins. Each voter casts one vote
 seats = 1
 
 # Whether voters MUST vote (true) or voting is optional (false)
-# In Criptocracia context: always false — voters choose to participate
+# In Parallelia context: always false — voters choose to participate
 voting_required = false
 
 # Minimum number of candidates required to hold a valid election

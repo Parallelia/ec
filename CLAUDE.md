@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Criptocracia EC is the Electoral Commission daemon for a trustless electronic voting system. It manages elections, issues anonymous voting tokens via blind RSA signatures, communicates with voters over Nostr (NIP-59 Gift Wrap), and publishes verifiable results. **Experimental, unaudited software.**
+Parallelia EC is the Electoral Commission daemon for a trustless electronic voting system. It manages elections, issues anonymous voting tokens via blind RSA signatures, communicates with voters over Nostr (NIP-59 Gift Wrap), and publishes verifiable results. **Experimental, unaudited software.**
 
 ## Build & Test Commands
 

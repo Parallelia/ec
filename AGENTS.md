@@ -1,8 +1,8 @@
-# AGENTS.md — Criptocracia EC
+# AGENTS.md — Parallelia EC
 
 ## Project
 
-Electoral Commission daemon for the Criptocracia trustless voting system.
+Electoral Commission daemon for the Parallelia trustless voting system.
 See `.specify/memory/constitution.md` for governing principles.
 See `.specify/specs/001-ec-core.md` for the feature specification.
 See `.specify/specs/001-ec-core-plan.md` for the technical plan.
