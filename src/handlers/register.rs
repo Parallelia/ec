@@ -21,10 +21,14 @@ pub async fn handle(
     match handle_inner(pool, sender, election_id, registration_token).await {
         Ok(()) => OutboundMessage::ok("register-confirmed"),
         Err(e) => {
+            // Extract error code from the message format "CODE: description".
+            // Only known codes are relayed; unknown errors stay in the logs
+            // to avoid leaking internals to voters.
             let msg = e.to_string();
-            // Extract error code from the message format "CODE: description"
-            if let Some((code, description)) = msg.split_once(": ") {
-                OutboundMessage::error(error_code(code), description)
+            if let Some((code, description)) = msg.split_once(": ")
+                && let Some(known) = error_code(code)
+            {
+                OutboundMessage::error(known, description)
             } else {
                 tracing::error!(error = %e, "Unexpected error in register handler");
                 OutboundMessage::error("INTERNAL_ERROR", "An unexpected error occurred")
@@ -79,13 +83,13 @@ async fn handle_inner(
 }
 
 /// Map known error codes to static string references.
-/// This avoids lifetime issues with dynamically extracted codes.
-fn error_code(code: &str) -> &'static str {
+/// Returns None for anything that is not a protocol error code.
+fn error_code(code: &str) -> Option<&'static str> {
     match code {
-        "ELECTION_NOT_FOUND" => "ELECTION_NOT_FOUND",
-        "ELECTION_CLOSED" => "ELECTION_CLOSED",
-        "INVALID_TOKEN" => "INVALID_TOKEN",
-        "ALREADY_REGISTERED" => "ALREADY_REGISTERED",
-        _ => "INTERNAL_ERROR",
+        "ELECTION_NOT_FOUND" => Some("ELECTION_NOT_FOUND"),
+        "ELECTION_CLOSED" => Some("ELECTION_CLOSED"),
+        "INVALID_TOKEN" => Some("INVALID_TOKEN"),
+        "ALREADY_REGISTERED" => Some("ALREADY_REGISTERED"),
+        _ => None,
     }
 }

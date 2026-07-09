@@ -34,15 +34,26 @@ impl TestElection {
 }
 
 async fn seed_election(pool: &SqlitePool, te: &TestElection, rules_id: &str) {
+    let now = chrono::Utc::now().timestamp();
+    seed_election_with_times(pool, te, rules_id, now - 100, now + 3600).await;
+}
+
+async fn seed_election_with_times(
+    pool: &SqlitePool,
+    te: &TestElection,
+    rules_id: &str,
+    start_time: i64,
+    end_time: i64,
+) {
     let election = Election {
         id: "test-election-1".to_string(),
         name: "Test Election".to_string(),
-        start_time: 1000,
-        end_time: 2000,
+        start_time,
+        end_time,
         status: "in_progress".to_string(),
         rules_id: rules_id.to_string(),
         rsa_pub_key: te.pk_b64.clone(),
-        created_at: 1000,
+        created_at: start_time,
         results_published: 0,
     };
     db::create_election(
@@ -268,6 +279,33 @@ async fn cast_vote_invalid_ballot() {
     let json = serde_json::to_value(&response).unwrap();
     assert_eq!(json["status"], "error");
     assert_eq!(json["code"], "BALLOT_INVALID");
+}
+
+/// Votes past end_time must be rejected even if the scheduler has not yet
+/// flipped the status from in_progress to finished (it ticks every 30s).
+#[tokio::test]
+async fn cast_vote_rejected_after_end_time() {
+    let pool = setup_db().await;
+    let te = TestElection::new();
+    let now = chrono::Utc::now().timestamp();
+    seed_election_with_times(&pool, &te, "plurality", now - 7200, now - 60).await;
+    seed_candidates(&pool, "test-election-1", &[1, 2, 3]).await;
+
+    let (h_n, token) = create_valid_token(&te.pk_b64, &te.sk_b64);
+
+    let response = cast_vote::handle(
+        &pool,
+        "test-election-1",
+        &[1],
+        &h_n,
+        &token,
+        Path::new("rules"),
+    )
+    .await;
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], "ELECTION_CLOSED");
 }
 
 #[tokio::test]
