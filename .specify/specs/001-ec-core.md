@@ -3,14 +3,14 @@
 **Feature Branch**: `001-ec-core`  
 **Created**: 2026-03-10  
 **Status**: Draft  
-**Repo**: https://github.com/kriptocracia/ec
+**Repo**: https://github.com/parallelia/ec
 
 ---
 
 ## Context
 
 This is a clean rewrite of the Electoral Commission daemon from the Criptocracia MVP
-(`kriptocracia/criptocracia`). The MVP validated the cryptographic protocol
+(`parallelia/criptocracia`). The MVP validated the cryptographic protocol
 (blind RSA signatures over Nostr). This rewrite adds the **complete voter registration flow**
 (MVP issues #2–#5), a **pluggable counting engine**, improves architecture, and separates
 the EC from the voter client.

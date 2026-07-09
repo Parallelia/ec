@@ -1,4 +1,4 @@
-# Criptocracia EC — Project Constitution
+# Parallelia EC — Project Constitution
 
 **Version**: 1.0.0  
 **Ratification Date**: 2026-03-10  
@@ -9,7 +9,7 @@
 
 ## Purpose
 
-The Electoral Commission (`ec`) is the server-side daemon of the Criptocracia voting system — an experimental, trustless, open-source electronic voting platform. Its mission is to enable **free, anonymous, verifiable, and censorship-resistant elections** for communities of any size, without requiring trust in any central authority beyond the cryptographic guarantees of the protocol itself.
+The Electoral Commission (`ec`) is the server-side daemon of the Parallelia voting system — an experimental, trustless, open-source electronic voting platform. Its mission is to enable **free, anonymous, verifiable, and censorship-resistant elections** for communities of any size, without requiring trust in any central authority beyond the cryptographic guarantees of the protocol itself.
 
 ---
 
