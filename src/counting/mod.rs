@@ -50,7 +50,31 @@ pub struct CountRound {
 }
 
 pub trait CountingAlgorithm: Send + Sync {
-    fn count(&self, ballots: &[Ballot], rules: &ElectionRules) -> Result<CountResult>;
+    /// Count ballots for the given election.
+    /// `candidates` is the authoritative candidate list from the database, so
+    /// candidates without any votes still appear in the tally and can be elected.
+    fn count(
+        &self,
+        ballots: &[Ballot],
+        candidates: &[u8],
+        rules: &ElectionRules,
+    ) -> Result<CountResult>;
+}
+
+/// Deterministic default seed for "random" tie-breaking, derived from the
+/// candidate set. Predictable by design: it can be recomputed by any auditor.
+/// Elections that need an unpredictable-but-auditable draw must set
+/// `tie_breaking_seed` in their rules file.
+pub(crate) fn default_tie_seed(candidate_ids: &std::collections::BTreeSet<u8>) -> u64 {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for id in candidate_ids {
+        hasher.update([*id]);
+    }
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    u64::from_le_bytes(bytes)
 }
 
 mod plurality;

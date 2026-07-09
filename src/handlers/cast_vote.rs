@@ -3,7 +3,7 @@ use sqlx::SqlitePool;
 use std::path::Path;
 
 use crate::nostr::messages::OutboundMessage;
-use crate::rules::{BallotMethod, ElectionRules};
+use crate::rules::ElectionRules;
 use crate::types::Vote;
 
 /// Handle a cast-vote request from an anonymous voter keypair.
@@ -24,9 +24,14 @@ pub async fn handle(
     match handle_inner(pool, election_id, candidate_ids, h_n, token, rules_dir).await {
         Ok(()) => OutboundMessage::ok("vote-recorded"),
         Err(e) => {
+            // Only descriptions attached to a known protocol code are relayed
+            // to the voter; anything else (sqlx, crypto, IO errors) stays in
+            // the logs to avoid leaking internals.
             let msg = e.to_string();
-            if let Some((code, description)) = msg.split_once(": ") {
-                OutboundMessage::error(error_code(code), description)
+            if let Some((code, description)) = msg.split_once(": ")
+                && let Some(known) = error_code(code)
+            {
+                OutboundMessage::error(known, description)
             } else {
                 tracing::error!(error = %e, "Unexpected error in cast-vote handler");
                 OutboundMessage::error("INTERNAL_ERROR", "An unexpected error occurred")
@@ -50,6 +55,11 @@ async fn handle_inner(
 
     if election.status != "in_progress" {
         anyhow::bail!("ELECTION_CLOSED: Election is not accepting votes");
+    }
+
+    // The scheduler flips status on a 30s tick; enforce the deadline exactly.
+    if chrono::Utc::now().timestamp() >= election.end_time {
+        anyhow::bail!("ELECTION_CLOSED: Election voting period has ended");
     }
 
     // 2. Verify the blind RSA signature
@@ -94,7 +104,9 @@ async fn handle_inner(
         id: 0, // auto-increment
         election_id: election_id.to_string(),
         candidate_ids: candidate_ids_json,
-        recorded_at: chrono::Utc::now().timestamp(),
+        // Coarse timestamp: exact arrival times could be correlated with
+        // relay traffic to deanonymize voters.
+        recorded_at: crate::db::truncate_to_hour(chrono::Utc::now().timestamp()),
     };
 
     let mut tx = pool.begin().await?;
@@ -146,27 +158,28 @@ pub fn validate_ballot(
         }
     }
 
-    if rules.ballot.method == BallotMethod::Ranked {
-        let mut seen = std::collections::HashSet::new();
-        for &id in candidate_ids {
-            if !seen.insert(id) {
-                anyhow::bail!("BALLOT_INVALID: Duplicate candidate {id} in ranked ballot");
-            }
+    // A candidate never appears twice on a ballot, regardless of method:
+    // ranked ballots can't repeat a preference, approval ballots can't
+    // approve the same candidate twice.
+    let mut seen = std::collections::HashSet::new();
+    for &id in candidate_ids {
+        if !seen.insert(id) {
+            anyhow::bail!("BALLOT_INVALID: Duplicate candidate {id} in ballot");
         }
     }
 
     Ok(())
 }
 
-fn error_code(code: &str) -> &'static str {
+fn error_code(code: &str) -> Option<&'static str> {
     match code {
-        "ELECTION_NOT_FOUND" => "ELECTION_NOT_FOUND",
-        "ELECTION_CLOSED" => "ELECTION_CLOSED",
-        "NONCE_ALREADY_USED" => "NONCE_ALREADY_USED",
-        "INVALID_TOKEN" => "INVALID_TOKEN",
-        "INVALID_CANDIDATE" => "INVALID_CANDIDATE",
-        "BALLOT_INVALID" => "BALLOT_INVALID",
-        "UNKNOWN_RULES" => "UNKNOWN_RULES",
-        _ => "INTERNAL_ERROR",
+        "ELECTION_NOT_FOUND" => Some("ELECTION_NOT_FOUND"),
+        "ELECTION_CLOSED" => Some("ELECTION_CLOSED"),
+        "NONCE_ALREADY_USED" => Some("NONCE_ALREADY_USED"),
+        "INVALID_TOKEN" => Some("INVALID_TOKEN"),
+        "INVALID_CANDIDATE" => Some("INVALID_CANDIDATE"),
+        "BALLOT_INVALID" => Some("BALLOT_INVALID"),
+        "UNKNOWN_RULES" => Some("UNKNOWN_RULES"),
+        _ => None,
     }
 }

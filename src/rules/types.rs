@@ -56,6 +56,8 @@ pub struct CountingConfig {
     #[serde(default)]
     pub surplus_order: Option<String>,
     #[serde(default)]
+    pub exclusion_method: Option<String>,
+    #[serde(default)]
     pub bulk_exclusion: Option<bool>,
     #[serde(default)]
     pub bulk_election: Option<bool>,
@@ -63,6 +65,8 @@ pub struct CountingConfig {
     pub tie_breaking: Option<String>,
     #[serde(default)]
     pub tie_breaking_seed: Option<u64>,
+    #[serde(default)]
+    pub min_winner_votes: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

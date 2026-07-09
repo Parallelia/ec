@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
-use sha2::{Digest, Sha256};
 
 use crate::counting::{
     Ballot, CandidateStatus, CandidateTally, CountResult, CountRound, CountingAlgorithm,
+    default_tie_seed,
 };
 use crate::rules::{BallotMethod, ElectionRules};
 
@@ -21,11 +21,31 @@ struct WeightedBallot {
 }
 
 impl CountingAlgorithm for StvAlgorithm {
-    fn count(&self, ballots: &[Ballot], rules: &ElectionRules) -> Result<CountResult> {
+    fn count(
+        &self,
+        ballots: &[Ballot],
+        candidates: &[u8],
+        rules: &ElectionRules,
+    ) -> Result<CountResult> {
         if rules.ballot.method != BallotMethod::Ranked {
             anyhow::bail!("STV requires ranked ballots");
         }
         // Explicitly reject TOML options we do not support yet.
+        if let Some(quota) = rules.counting.quota.as_deref()
+            && quota != "droop"
+        {
+            anyhow::bail!("NotImplemented: quota={quota}");
+        }
+        if let Some(method) = rules.counting.transfer_method.as_deref()
+            && method != "weighted_inclusive_gregory"
+        {
+            anyhow::bail!("NotImplemented: transfer_method={method}");
+        }
+        if let Some(method) = rules.counting.exclusion_method.as_deref()
+            && method != "one_round"
+        {
+            anyhow::bail!("NotImplemented: exclusion_method={method}");
+        }
         if let Some(mode) = rules.counting.quota_mode.as_deref()
             && mode != "static"
         {
@@ -50,8 +70,9 @@ impl CountingAlgorithm for StvAlgorithm {
 
         let seats = rules.election.seats.max(1) as usize;
 
-        // Build candidate set from ballots.
-        let mut candidate_ids: BTreeSet<u8> = BTreeSet::new();
+        // Authoritative candidate set from the database, plus any ids found in
+        // ballots (defensive: ballots are validated against the DB at cast time).
+        let mut candidate_ids: BTreeSet<u8> = candidates.iter().copied().collect();
         for b in ballots {
             for &c in b {
                 candidate_ids.insert(c);
@@ -92,7 +113,7 @@ impl CountingAlgorithm for StvAlgorithm {
 
         loop {
             // Tally is pure and does not mutate ballot assignment.
-            let tallies_map = tally(&wb, &status, &candidate_ids);
+            let tallies_map = tally(&wb, &candidate_ids);
 
             let mut tallies_vec: Vec<CandidateTally> = tallies_map
                 .iter()
@@ -120,12 +141,19 @@ impl CountingAlgorithm for StvAlgorithm {
                 break;
             }
             if active_left <= seats_remaining {
-                let active_ids: Vec<u8> = status
+                // Bulk election: elect remaining actives in order of current
+                // tally (descending), since order of election matters in STV.
+                let mut active_ids: Vec<(u8, f64)> = status
                     .iter()
                     .filter(|(_, s)| **s == CandidateStatus::Active)
-                    .map(|(&id, _)| id)
+                    .map(|(&id, _)| (id, *tallies_map.get(&id).unwrap_or(&0.0)))
                     .collect();
-                for id in active_ids {
+                active_ids.sort_by(|a, b| {
+                    b.1.partial_cmp(&a.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.0.cmp(&b.0))
+                });
+                for (id, _) in active_ids {
                     status.insert(id, CandidateStatus::Elected);
                     if !elected.contains(&id) {
                         elected.push(id);
@@ -257,7 +285,7 @@ impl CountingAlgorithm for StvAlgorithm {
         }
 
         // Final tally snapshot with final statuses.
-        let final_tallies = tally(&wb, &status, &candidate_ids);
+        let final_tallies = tally(&wb, &candidate_ids);
         let mut tally: Vec<CandidateTally> = final_tallies
             .iter()
             .map(|(&id, &votes)| CandidateTally {
@@ -276,14 +304,17 @@ impl CountingAlgorithm for StvAlgorithm {
     }
 }
 
-fn tally(
-    ballots: &[WeightedBallot],
-    status: &BTreeMap<u8, CandidateStatus>,
-    candidates: &BTreeSet<u8>,
-) -> BTreeMap<u8, f64> {
+/// Tally by each ballot's *current* assignment (`prefs[current]`), never by
+/// scanning ahead to the next active preference. Ballots retained by an
+/// elected candidate stay pinned to that candidate (holding the quota);
+/// scanning ahead here would make the retained portion flow to the next
+/// preference too, transferring the full ballot weight instead of only the
+/// surplus. Ballot movement happens exclusively in the surplus-transfer and
+/// exclusion steps.
+fn tally(ballots: &[WeightedBallot], candidates: &BTreeSet<u8>) -> BTreeMap<u8, f64> {
     let mut tallies: BTreeMap<u8, f64> = candidates.iter().map(|&c| (c, 0.0)).collect();
     for ballot in ballots {
-        if let Some(cid) = assigned_candidate(ballot, status) {
+        if let Some(&cid) = ballot.prefs.get(ballot.current) {
             *tallies.entry(cid).or_insert(0.0) += ballot.weight;
         }
     }
@@ -303,13 +334,6 @@ fn next_active_pref_index(
         i += 1;
     }
     None
-}
-
-fn assigned_candidate(
-    ballot: &WeightedBallot,
-    status: &BTreeMap<u8, CandidateStatus>,
-) -> Option<u8> {
-    next_active_pref_index(ballot, status).map(|i| ballot.prefs[i])
 }
 
 fn assigned_current(ballot: &WeightedBallot) -> Option<u8> {
@@ -396,17 +420,6 @@ fn break_tie_random(tied: &[u8], seed: u64) -> u8 {
     let mut rng = StdRng::seed_from_u64(seed);
     let idx = rng.random_range(0..tied.len());
     tied[idx]
-}
-
-fn default_tie_seed(candidate_ids: &BTreeSet<u8>) -> u64 {
-    let mut hasher = Sha256::new();
-    for id in candidate_ids {
-        hasher.update([*id]);
-    }
-    let digest = hasher.finalize();
-    let mut bytes = [0_u8; 8];
-    bytes.copy_from_slice(&digest[..8]);
-    u64::from_le_bytes(bytes)
 }
 
 fn approx_equal(a: f64, b: f64, eps: f64) -> bool {

@@ -2,7 +2,7 @@ use anyhow::Result;
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 
-use crate::types::{AuthorizedVoter, Candidate, Election, RegistrationToken, UsedNonce, Vote};
+use crate::types::{AuthorizedVoter, Candidate, Election, RegistrationToken, Vote};
 
 pub async fn create_election(
     pool: &SqlitePool,
@@ -389,40 +389,11 @@ pub async fn mark_token_issued(
     Ok(rows)
 }
 
-pub async fn is_nonce_used(pool: &SqlitePool, election_id: &str, h_n: &str) -> Result<bool> {
-    let existing: Option<UsedNonce> = sqlx::query_as(
-        r#"
-        SELECT h_n, election_id, recorded_at
-        FROM used_nonces
-        WHERE election_id = ?1 AND h_n = ?2
-        "#,
-    )
-    .bind(election_id)
-    .bind(h_n)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(existing.is_some())
-}
-
-pub async fn mark_nonce_used(pool: &SqlitePool, election_id: &str, h_n: &str) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO used_nonces (h_n, election_id)
-        VALUES (?1, ?2)
-        "#,
-    )
-    .bind(h_n)
-    .bind(election_id)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
 /// Atomically attempt to mark a nonce as used via INSERT.
 /// Returns `true` if the nonce was newly inserted, `false` if it already existed
 /// (relies on the PRIMARY KEY constraint on (h_n, election_id)).
+/// The timestamp is truncated to the hour so it cannot be correlated with
+/// relay traffic to deanonymize voters.
 pub async fn try_mark_nonce_used(
     tx: &mut Transaction<'_, Sqlite>,
     election_id: &str,
@@ -430,12 +401,13 @@ pub async fn try_mark_nonce_used(
 ) -> Result<bool> {
     let result = sqlx::query(
         r#"
-        INSERT OR IGNORE INTO used_nonces (h_n, election_id)
-        VALUES (?1, ?2)
+        INSERT OR IGNORE INTO used_nonces (h_n, election_id, recorded_at)
+        VALUES (?1, ?2, ?3)
         "#,
     )
     .bind(h_n)
     .bind(election_id)
+    .bind(truncate_to_hour(chrono::Utc::now().timestamp()))
     .execute(tx.as_mut())
     .await?;
 
@@ -444,20 +416,11 @@ pub async fn try_mark_nonce_used(
     Ok(was_new)
 }
 
-pub async fn insert_vote(pool: &SqlitePool, vote: &Vote) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO votes (election_id, candidate_ids, recorded_at)
-        VALUES (?1, ?2, ?3)
-        "#,
-    )
-    .bind(&vote.election_id)
-    .bind(&vote.candidate_ids)
-    .bind(vote.recorded_at)
-    .execute(pool)
-    .await?;
-
-    Ok(())
+/// Truncate a unix timestamp to the start of its hour. Vote-related rows only
+/// store coarse timestamps so they cannot be correlated with observed relay
+/// traffic to link a vote to a voter.
+pub fn truncate_to_hour(ts: i64) -> i64 {
+    ts - ts.rem_euclid(3600)
 }
 
 pub async fn insert_vote_tx(tx: &mut Transaction<'_, Sqlite>, vote: &Vote) -> Result<()> {

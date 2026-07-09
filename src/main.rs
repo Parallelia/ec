@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use nostr_sdk::prelude::{Client, Keys};
 use secrecy::ExposeSecret;
+use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
 use tracing_subscriber::EnvFilter;
@@ -12,12 +13,25 @@ use ec::state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing();
-
+    // Load config first so LOG_LEVEL / ec.toml log_level can seed the filter.
     let config = Config::load()?;
+    init_tracing(&config.log_level);
 
-    let options = SqliteConnectOptions::from_str(&config.db_path)?
-        .create_if_missing(true);
+    tracing::info!(
+        relay_url = %config.relay_url,
+        grpc_bind = %config.grpc_bind,
+        rules_dir = %config.rules_dir.display(),
+        db_path = %config.db_path,
+        "Configuration loaded"
+    );
+
+    if config.db_password.is_some() {
+        tracing::warn!(
+            "EC_DB_PASSWORD is set but database encryption is not implemented yet; the value is ignored"
+        );
+    }
+
+    let options = SqliteConnectOptions::from_str(&config.db_path)?.create_if_missing(true);
 
     let db = SqlitePoolOptions::new()
         .max_connections(5)
@@ -55,15 +69,54 @@ async fn main() -> Result<()> {
     let listener_handle = tokio::spawn(ec::nostr::listener::listen(state.clone()));
 
     // Start the gRPC admin API server.
-    let grpc_addr = state.config.grpc_bind.parse()?;
+    let grpc_addr: std::net::SocketAddr = state.config.grpc_bind.parse()?;
     let admin_service = ec::grpc::admin::AdminService::new(
         state.db.clone(),
         state.config.rules_dir.clone(),
         state.nostr_client.clone(),
     );
+
+    // Admin auth: when EC_ADMIN_TOKEN is set, every call must carry
+    // `authorization: Bearer <token>`. Comparison happens over SHA-256
+    // digests so the secret itself is not held in the interceptor closure.
+    let expected_auth: Option<[u8; 32]> = state
+        .config
+        .admin_token
+        .as_ref()
+        .map(|t| Sha256::digest(format!("Bearer {}", t.expose_secret()).as_bytes()).into());
+    if expected_auth.is_none() && !grpc_addr.ip().is_loopback() {
+        tracing::warn!(
+            grpc_bind = %state.config.grpc_bind,
+            "gRPC admin API is bound to a non-loopback address WITHOUT EC_ADMIN_TOKEN — \
+             anyone who can reach this port can administer elections"
+        );
+    }
+    let auth_interceptor =
+        move |req: tonic::Request<()>| -> Result<tonic::Request<()>, tonic::Status> {
+            if let Some(expected) = expected_auth {
+                let provided = req
+                    .metadata()
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                let provided_hash: [u8; 32] = Sha256::digest(provided.as_bytes()).into();
+                if provided_hash != expected {
+                    return Err(tonic::Status::unauthenticated(
+                        "invalid or missing admin token",
+                    ));
+                }
+            }
+            Ok(req)
+        };
+
     let grpc_handle = tokio::spawn(
         tonic::transport::Server::builder()
-            .add_service(ec::grpc::proto::admin_server::AdminServer::new(admin_service))
+            .add_service(
+                ec::grpc::proto::admin_server::AdminServer::with_interceptor(
+                    admin_service,
+                    auth_interceptor,
+                ),
+            )
             .serve(grpc_addr),
     );
 
@@ -103,8 +156,10 @@ async fn main() -> Result<()> {
     }
 }
 
-fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+/// RUST_LOG takes precedence; otherwise fall back to the configured level
+/// (LOG_LEVEL env var or `log_level` in ec.toml).
+fn init_tracing(log_level: &str) {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)

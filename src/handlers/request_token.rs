@@ -22,9 +22,13 @@ pub async fn handle(
     match handle_inner(pool, sender, election_id, blinded_nonce).await {
         Ok(blind_sig_b64) => OutboundMessage::ok_with_signature("token-issued", blind_sig_b64),
         Err(e) => {
+            // Only known protocol codes are relayed to the voter; anything
+            // else (sqlx, crypto errors) stays in the logs.
             let msg = e.to_string();
-            if let Some((code, description)) = msg.split_once(": ") {
-                OutboundMessage::error(error_code(code), description)
+            if let Some((code, description)) = msg.split_once(": ")
+                && let Some(known) = error_code(code)
+            {
+                OutboundMessage::error(known, description)
             } else {
                 tracing::error!(error = %e, "Unexpected error in request-token handler");
                 OutboundMessage::error("INTERNAL_ERROR", "An unexpected error occurred")
@@ -94,14 +98,13 @@ async fn handle_inner(
     Ok(base64::engine::general_purpose::STANDARD.encode(&blind_sig))
 }
 
-fn error_code(code: &str) -> &'static str {
+fn error_code(code: &str) -> Option<&'static str> {
     match code {
-        "ELECTION_NOT_FOUND" => "ELECTION_NOT_FOUND",
-        "ELECTION_CLOSED" => "ELECTION_CLOSED",
-        "NOT_AUTHORIZED" => "NOT_AUTHORIZED",
-        "ALREADY_ISSUED" => "ALREADY_ISSUED",
-        "INVALID_TOKEN" => "INVALID_TOKEN",
-        "INTERNAL_ERROR" => "INTERNAL_ERROR",
-        _ => "INTERNAL_ERROR",
+        "ELECTION_NOT_FOUND" => Some("ELECTION_NOT_FOUND"),
+        "ELECTION_CLOSED" => Some("ELECTION_CLOSED"),
+        "NOT_AUTHORIZED" => Some("NOT_AUTHORIZED"),
+        "ALREADY_ISSUED" => Some("ALREADY_ISSUED"),
+        "INVALID_TOKEN" => Some("INVALID_TOKEN"),
+        _ => None,
     }
 }
