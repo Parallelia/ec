@@ -2,8 +2,8 @@ use secrecy::SecretString;
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
 
-use ec::{crypto, db};
 use ec::types::Election;
+use ec::{crypto, db};
 
 async fn setup_pool() -> SqlitePool {
     let pool = SqlitePoolOptions::new()

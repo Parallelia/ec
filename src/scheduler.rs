@@ -32,6 +32,7 @@ async fn tick(pool: &SqlitePool, nostr_client: &Client, rules_dir: &Path) -> Res
         let rows = db::start_election(pool, &election.id).await?;
         if rows > 0 {
             tracing::info!(election_id = %election.id, "Election started (open → in_progress)");
+            republish_announcement(pool, nostr_client, &election.id).await;
         }
     }
 
@@ -41,6 +42,7 @@ async fn tick(pool: &SqlitePool, nostr_client: &Client, rules_dir: &Path) -> Res
         let rows = db::finish_election(pool, &election.id).await?;
         if rows > 0 {
             tracing::info!(election_id = %election.id, "Election finished (in_progress → finished)");
+            republish_announcement(pool, nostr_client, &election.id).await;
         }
     }
 
@@ -66,6 +68,29 @@ async fn tick(pool: &SqlitePool, nostr_client: &Client, rules_dir: &Path) -> Res
     Ok(())
 }
 
+/// Re-publish the Kind 35000 announcement so relay clients see the updated
+/// election status. Failures are logged, never fatal: the announcement is a
+/// replaceable event and the next state change will publish a fresh one.
+async fn republish_announcement(pool: &SqlitePool, nostr_client: &Client, election_id: &str) {
+    let result: Result<()> = async {
+        let election = db::get_election(pool, election_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("election not found"))?;
+        let candidates = db::get_candidates_for_election(pool, election_id).await?;
+        nostr::publisher::publish_election_event(nostr_client, &election, &candidates).await?;
+        Ok(())
+    }
+    .await;
+
+    if let Err(e) = result {
+        tracing::warn!(
+            election_id = %election_id,
+            error = %e,
+            "Failed to re-publish election announcement"
+        );
+    }
+}
+
 /// Load rules, count ballots, and publish the result event to Nostr.
 async fn count_and_publish(
     pool: &SqlitePool,
@@ -82,7 +107,10 @@ async fn count_and_publish(
         .map(|v| serde_json::from_str(&v.candidate_ids))
         .collect::<Result<_, _>>()?;
 
-    let result = algorithm.count(&ballots, &rules)?;
+    let candidates = db::get_candidates_for_election(pool, &election.id).await?;
+    let candidate_ids: Vec<u8> = candidates.iter().map(|c| c.id).collect();
+
+    let result = algorithm.count(&ballots, &candidate_ids, &rules)?;
 
     tracing::info!(
         election_id = %election.id,
