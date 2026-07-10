@@ -76,3 +76,13 @@ fn stv_invalid_candidate() {
     let err = validate_ballot(&[1, 2, 99], &rules, &candidates).unwrap_err();
     assert!(err.to_string().contains("INVALID_CANDIDATE"));
 }
+
+#[test]
+fn ballot_longer_than_u8_max_is_rejected_before_counting() {
+    let rules = load_rules("stv", Path::new("rules")).expect("load rules");
+    let candidates: Vec<u8> = (0..=255).collect();
+    // 300 entries: longer than any possible candidate set (u8::MAX).
+    let oversized: Vec<u8> = (0..300).map(|i| (i % 256) as u8).collect();
+    let err = validate_ballot(&oversized, &rules, &candidates).unwrap_err();
+    assert!(err.to_string().contains("Too many choices"));
+}

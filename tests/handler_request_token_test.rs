@@ -1,3 +1,5 @@
+mod common;
+
 use base64::Engine;
 use blind_rsa_signatures::{DefaultRng, PSS, Randomized, Sha384};
 use nostr_sdk::prelude::*;
@@ -10,6 +12,7 @@ use ec::handlers::request_token;
 use ec::types::Election;
 
 async fn setup_db() -> SqlitePool {
+    common::init_tracing();
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -169,4 +172,121 @@ async fn request_token_election_not_in_progress() {
     let json = serde_json::to_value(&response).unwrap();
     assert_eq!(json["status"], "error");
     assert_eq!(json["code"], "ELECTION_CLOSED");
+}
+
+#[tokio::test]
+async fn request_token_election_not_found() {
+    let pool = setup_db().await;
+
+    let voter_keys = Keys::generate();
+    let response = request_token::handle(&pool, &voter_keys.public_key(), "missing", "AAAA").await;
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], "ELECTION_NOT_FOUND");
+}
+
+#[tokio::test]
+async fn request_token_rejects_malformed_blinded_nonce() {
+    let pool = setup_db().await;
+    let (pk_b64, sk_b64) = generate_rsa_keypair();
+    seed_election_with_key(&pool, "in_progress", &pk_b64, &sk_b64).await;
+
+    let voter_keys = Keys::generate();
+    seed_authorized_voter(&pool, "test-election-1", &voter_keys.public_key().to_hex()).await;
+
+    let response = request_token::handle(
+        &pool,
+        &voter_keys.public_key(),
+        "test-election-1",
+        "!!!not-base64!!!",
+    )
+    .await;
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], "INVALID_TOKEN");
+}
+
+#[tokio::test]
+async fn request_token_internal_error_when_key_missing() {
+    let pool = setup_db().await;
+
+    // Insert an election row WITHOUT a matching election_keys row.
+    sqlx::query(
+        "INSERT INTO elections (id, name, start_time, end_time, status, rules_id, rsa_pub_key, created_at)
+         VALUES ('test-election-1', 'No Key', 1000, 2000, 'in_progress', 'plurality', 'pk', 1000)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let voter_keys = Keys::generate();
+    seed_authorized_voter(&pool, "test-election-1", &voter_keys.public_key().to_hex()).await;
+
+    let blinded_b64 = base64::engine::general_purpose::STANDARD.encode(b"blinded");
+    let response = request_token::handle(
+        &pool,
+        &voter_keys.public_key(),
+        "test-election-1",
+        &blinded_b64,
+    )
+    .await;
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], "INTERNAL_ERROR");
+}
+
+#[tokio::test]
+async fn request_token_internal_error_on_crypto_failure() {
+    let pool = setup_db().await;
+    let (pk_b64, _) = generate_rsa_keypair();
+    // The stored "private key" is garbage: blind_sign must fail internally.
+    seed_election_with_key(&pool, "in_progress", &pk_b64, "bm90LWEta2V5").await;
+
+    let voter_keys = Keys::generate();
+    seed_authorized_voter(&pool, "test-election-1", &voter_keys.public_key().to_hex()).await;
+
+    let blinded_b64 = base64::engine::general_purpose::STANDARD.encode(b"blinded");
+    let response = request_token::handle(
+        &pool,
+        &voter_keys.public_key(),
+        "test-election-1",
+        &blinded_b64,
+    )
+    .await;
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], "INTERNAL_ERROR");
+}
+
+#[tokio::test]
+async fn request_token_internal_error_on_db_failure() {
+    let pool = setup_db().await;
+    pool.close().await;
+
+    let voter_keys = Keys::generate();
+    let response = request_token::handle(&pool, &voter_keys.public_key(), "any", "AAAA").await;
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], "INTERNAL_ERROR");
+}
+
+#[tokio::test]
+async fn request_token_db_error_with_colon_is_not_leaked() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+
+    let voter_keys = Keys::generate();
+    let response = request_token::handle(&pool, &voter_keys.public_key(), "any", "AAAA").await;
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], "INTERNAL_ERROR");
 }

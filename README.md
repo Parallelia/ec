@@ -379,6 +379,7 @@ Environment variable  >  ec.toml  >  Hardcoded default
 |---|---|---|
 | `NOSTR_PRIVATE_KEY` | Yes | Hex-encoded Nostr private key for the EC identity |
 | `EC_DB_PASSWORD` | No | Password to encrypt per-election RSA keys (not yet implemented) |
+| `EC_ADMIN_TOKEN` | No | Bearer token for the gRPC admin API. When set, every call must carry `authorization: Bearer <token>`; unset or empty disables auth (safe only on loopback) |
 | `RELAY_URL` | No | Overrides `relay_url` from `ec.toml` |
 | `GRPC_BIND` | No | Overrides `grpc_bind` from `ec.toml` |
 | `RULES_DIR` | No | Overrides `rules_dir` from `ec.toml` |
@@ -427,13 +428,66 @@ SQLite with 7 tables across 3 migrations. Key design decisions:
 
 ```bash
 cargo build                                          # Build
-cargo test                                           # Run all tests (37 integration tests)
+cargo test                                           # Run all tests (159 tests)
 cargo clippy --all-targets --all-features -- -D warnings  # Lint (must pass clean)
 cargo fmt                                            # Format
 cargo fmt -- --check                                 # Check formatting
 ```
 
-Tests live in `tests/` as integration tests. They use in-memory SQLite databases and don't require a running relay.
+### Testing
+
+Tests live in `tests/` as integration tests (plus a few unit tests for private
+helpers in `src/main.rs`). They use in-memory SQLite databases and an
+**in-memory fake Nostr relay** (`tests/common/mod.rs`) — no external services
+are required. The fake relay speaks just enough NIP-01 (`EVENT`/`OK`/`REQ`/`EOSE`
+plus broadcast) to exercise the real networking paths.
+
+| Test file | What it covers |
+|---|---|
+| `nostr_listener_test.rs` | Full voter flow end-to-end over NIP-59 Gift Wrap: register → request-token → cast-vote, `request_id` correlation, malformed messages, undecryptable wraps |
+| `scheduler_test.rs` | The real `scheduler::run()` loop: status transitions, counting, result publishing, retry-on-failure, tick errors |
+| `grpc_admin_test.rs` | Every admin RPC (happy paths, validation, path-traversal rejection, DB failures) |
+| `nostr_publisher_test.rs` | Kind 35000/35001 events, with/without STV count sheet, relay failures |
+| `handler_*_test.rs` | Register / request-token / cast-vote handlers, every protocol error code, no internal-error leakage to voters |
+| `counting_*_test.rs`, `ballot_validation_test.rs` | Plurality + STV algorithms: surplus transfers, exclusions, all tie-breaking modes (`backwards`/`random`/`manual`), unsupported options |
+| `db_test.rs`, `crypto_test.rs`, `rules_test.rs`, `config_test.rs` | Query layer, blind RSA error paths, rules loading, hybrid config precedence |
+| `main_binary_test.rs` | Daemon startup smoke tests (config, migrations, Nostr client, gRPC bind) driving the real binary to controlled exits |
+| `request_id_correlation_test.rs` | Reply correlation contract for `request_id` |
+
+### Code Coverage
+
+Coverage is measured with [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)
+(LLVM source-based instrumentation, the de-facto standard for Rust):
+
+```bash
+# One-time setup
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov
+
+# Terminal summary
+cargo llvm-cov --summary-only
+
+# Browsable HTML report (target/llvm-cov/html/index.html)
+cargo llvm-cov --html
+
+# Show exactly which lines are uncovered
+cargo llvm-cov report --show-missing-lines
+```
+
+Current status (`cargo llvm-cov --summary-only`):
+
+| Metric | Coverage |
+|---|---|
+| **Lines** | **98.2%** |
+| Functions | 96.9% |
+| Regions | 95.2% |
+
+Twelve of sixteen source files are at 100% line coverage (`config`, `counting/mod`,
+`counting/plurality`, `crypto`, `db`, `handlers/*`, `nostr/messages`, `rules`, …).
+The remaining ~1.8% consists of branches that only occur under race conditions
+(e.g. two schedulers competing for the same transition), defensive unreachable
+code in STV, and `tracing` macro instrumentation artifacts — verified to execute
+but misattributed by the coverage tooling.
 
 ## Docker
 
