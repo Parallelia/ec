@@ -2,7 +2,7 @@ use anyhow::Result;
 use nostr_sdk::prelude::*;
 
 use crate::handlers;
-use crate::nostr::messages::{InboundMessage, OutboundMessage};
+use crate::nostr::messages::{self, InboundMessage, OutboundMessage};
 use crate::state::SharedState;
 
 /// Start listening for NIP-59 Gift Wrap messages addressed to the EC.
@@ -51,13 +51,25 @@ async fn handle_gift_wrap(state: &SharedState, event: &Event) -> Result<()> {
     let sender = unwrapped.sender;
     let content = &unwrapped.rumor.content;
 
-    let response = match serde_json::from_str::<InboundMessage>(content) {
+    // The request_id is extracted from the raw JSON value (not the parsed
+    // message) so even an INVALID_MESSAGE reply stays correlatable to the
+    // request that caused it.
+    let (request_id, parsed) = match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(value) => (
+            messages::request_id_from_value(&value),
+            serde_json::from_value::<InboundMessage>(value).map_err(|e| e.to_string()),
+        ),
+        Err(e) => (None, Err(e.to_string())),
+    };
+
+    let response = match parsed {
         Ok(msg) => dispatch(state, &sender, msg).await,
         Err(e) => {
             tracing::warn!(error = %e, "Invalid inbound message format");
             OutboundMessage::error("INVALID_MESSAGE", format!("Malformed request: {e}"))
         }
-    };
+    }
+    .with_request_id(request_id);
 
     send_reply(state, &sender, &response).await?;
 
