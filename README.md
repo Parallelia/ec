@@ -379,6 +379,7 @@ Environment variable  >  ec.toml  >  Hardcoded default
 |---|---|---|
 | `NOSTR_PRIVATE_KEY` | Yes | Hex-encoded Nostr private key for the EC identity |
 | `EC_DB_PASSWORD` | No | Password to encrypt per-election RSA keys (not yet implemented) |
+| `EC_ADMIN_TOKEN` | No | Bearer token for the gRPC admin API. When set, every call must carry `authorization: Bearer <token>`; unset or empty disables auth (safe only on loopback) |
 | `RELAY_URL` | No | Overrides `relay_url` from `ec.toml` |
 | `GRPC_BIND` | No | Overrides `grpc_bind` from `ec.toml` |
 | `RULES_DIR` | No | Overrides `rules_dir` from `ec.toml` |

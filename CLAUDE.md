@@ -11,7 +11,7 @@ Parallelia EC is the Electoral Commission daemon for a trustless electronic voti
 ```sh
 cargo build                                          # build
 cargo test                                           # run all tests (159, no external services needed)
-cargo test crypto_test                               # run a single test file
+cargo test --test crypto_test                        # run a single test file
 cargo test test_crypto_roundtrip                     # run a single test
 cargo clippy --all-targets --all-features -- -D warnings  # lint (must pass clean)
 cargo fmt                                            # format
@@ -65,7 +65,7 @@ New counting methods: implement `CountingAlgorithm` trait → register in `algor
 ### Config & Secrets
 
 - Non-secrets: `ec.toml` (versioned). Env vars override: `RELAY_URL`, `GRPC_BIND`, `RULES_DIR`, `LOG_LEVEL`, `DATABASE_URL`
-- Secrets: env vars only, wrapped in `SecretString`. Required: `NOSTR_PRIVATE_KEY`. Optional: `EC_DB_PASSWORD`
+- Secrets: env vars only, wrapped in `SecretString`. Required: `NOSTR_PRIVATE_KEY`. Optional: `EC_DB_PASSWORD`, `EC_ADMIN_TOKEN` (bearer auth for the gRPC admin API; empty value = disabled)
 - Dev: `cp .env.example .env` — loaded by `dotenvy` at startup
 
 ## Critical Rules

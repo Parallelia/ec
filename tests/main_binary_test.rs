@@ -30,6 +30,8 @@ fn base_command(dir: &std::path::Path) -> Command {
         .env_remove("EC_ADMIN_TOKEN")
         .env_remove("EC_DB_PASSWORD")
         .env_remove("RUST_LOG")
+        .env_remove("GRPC_BIND")
+        .env_remove("RULES_DIR")
         .env("DATABASE_URL", dir.join("ec.db").display().to_string())
         // Unreachable relay: add_relay/connect don't block startup.
         .env("RELAY_URL", "ws://127.0.0.1:1")
