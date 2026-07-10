@@ -11,10 +11,11 @@ See `.specify/specs/001-ec-core-plan.md` for the technical plan.
 
 ```sh
 cargo build
-cargo test
+cargo test                 # 159 tests, self-contained (in-memory SQLite + fake Nostr relay)
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt
 sqlx migrate run           # run SQLite migrations
+cargo llvm-cov --summary-only   # code coverage (cargo install cargo-llvm-cov)
 ```
 
 ## Rust & Dependency Versions
@@ -50,3 +51,4 @@ sqlx migrate run           # run SQLite migrations
 16. **`candidate_ids` in the `votes` table is a JSON TEXT array** (`[3]` or `[3,1,4,2]`). Never use a single integer column for votes — it breaks STV ranked ballots.
 17. Adding a new counting method = implement `CountingAlgorithm` + register in `algorithm_for()` + add a `.toml` in `rules/`. No other files need to change.
 18. **Add language identifiers to fenced code blocks** (e.g. `` ```rust ``, `` ```sql ``, `` ```text ``) to satisfy markdown linting (MD040).
+19. **Keep test coverage at or above the current baseline** (98% lines, measured with `cargo llvm-cov`). New features ship with tests. Use the shared helpers in `tests/common/mod.rs`: `start_fake_relay()` for anything that publishes to Nostr, `init_tracing()` in test setup. Tests that mutate env vars belong in `tests/config_test.rs` under its `ENV_LOCK` mutex.
