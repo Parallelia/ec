@@ -1,3 +1,5 @@
+mod common;
+
 use nostr_sdk::prelude::*;
 use secrecy::SecretString;
 use sqlx::SqlitePool;
@@ -8,6 +10,7 @@ use ec::handlers::register;
 use ec::types::Election;
 
 async fn setup_db() -> SqlitePool {
+    common::init_tracing();
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -172,4 +175,58 @@ async fn register_election_finished() {
     let json = serde_json::to_value(&response).unwrap();
     assert_eq!(json["status"], "error");
     assert_eq!(json["code"], "ELECTION_CLOSED");
+}
+
+#[tokio::test]
+async fn register_twice_with_fresh_token_reports_already_registered() {
+    let pool = setup_db().await;
+    seed_election(&pool, "open").await;
+    seed_token(&pool, "test-election-1", "token-one").await;
+    seed_token(&pool, "test-election-1", "token-two").await;
+
+    let keys = Keys::generate();
+    let first = register::handle(&pool, &keys.public_key(), "test-election-1", "token-one").await;
+    assert_eq!(serde_json::to_value(&first).unwrap()["status"], "ok");
+
+    // Same voter, different (valid) token → must be rejected and rolled back.
+    let second = register::handle(&pool, &keys.public_key(), "test-election-1", "token-two").await;
+    let json = serde_json::to_value(&second).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], "ALREADY_REGISTERED");
+
+    // The rollback must leave the second token unconsumed.
+    let tokens = db::list_registration_tokens(&pool, "test-election-1")
+        .await
+        .unwrap();
+    let token_two = tokens.iter().find(|t| t.token == "token-two").unwrap();
+    assert_eq!(token_two.used, 0);
+}
+
+#[tokio::test]
+async fn register_internal_error_on_db_failure() {
+    let pool = setup_db().await;
+    pool.close().await;
+
+    let keys = Keys::generate();
+    let response = register::handle(&pool, &keys.public_key(), "any", "any-token").await;
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], "INTERNAL_ERROR");
+}
+
+#[tokio::test]
+async fn register_db_error_with_colon_is_not_leaked() {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+
+    let keys = Keys::generate();
+    let response = register::handle(&pool, &keys.public_key(), "any", "any-token").await;
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], "INTERNAL_ERROR");
 }

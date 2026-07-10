@@ -1,3 +1,5 @@
+mod common;
+
 use base64::Engine;
 use blind_rsa_signatures::{DefaultRng, PSS, Randomized, Sha384};
 use secrecy::SecretString;
@@ -12,6 +14,7 @@ use ec::handlers::cast_vote;
 use ec::types::{Candidate, Election};
 
 async fn setup_db() -> SqlitePool {
+    common::init_tracing();
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -309,6 +312,161 @@ async fn cast_vote_rejected_after_end_time() {
 }
 
 #[tokio::test]
+async fn cast_vote_rejected_when_election_not_in_progress() {
+    let pool = setup_db().await;
+    let te = TestElection::new();
+    let now = chrono::Utc::now().timestamp();
+    let election = Election {
+        id: "test-election-1".to_string(),
+        name: "Test Election".to_string(),
+        start_time: now + 100,
+        end_time: now + 3600,
+        status: "open".to_string(),
+        rules_id: "plurality".to_string(),
+        rsa_pub_key: te.pk_b64.clone(),
+        created_at: now,
+        results_published: 0,
+    };
+    db::create_election(
+        &pool,
+        &election,
+        &SecretString::new(te.sk_b64.clone().into()),
+    )
+    .await
+    .unwrap();
+
+    let response = cast_vote::handle(
+        &pool,
+        "test-election-1",
+        &[1],
+        "deadbeef",
+        "irrelevant",
+        Path::new("rules"),
+    )
+    .await;
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], "ELECTION_CLOSED");
+}
+
+#[tokio::test]
+async fn cast_vote_token_not_base64() {
+    let pool = setup_db().await;
+    let te = TestElection::new();
+    seed_election(&pool, &te, "plurality").await;
+
+    let response = cast_vote::handle(
+        &pool,
+        "test-election-1",
+        &[1],
+        "deadbeef",
+        "!!!not-base64!!!",
+        Path::new("rules"),
+    )
+    .await;
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], "INVALID_TOKEN");
+    assert!(json["message"].as_str().unwrap().contains("base64"));
+}
+
+#[tokio::test]
+async fn cast_vote_token_too_short() {
+    let pool = setup_db().await;
+    let te = TestElection::new();
+    seed_election(&pool, &te, "plurality").await;
+
+    // 32 bytes or fewer cannot contain signature + randomizer.
+    let short_token = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
+
+    let response = cast_vote::handle(
+        &pool,
+        "test-election-1",
+        &[1],
+        "deadbeef",
+        &short_token,
+        Path::new("rules"),
+    )
+    .await;
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], "INVALID_TOKEN");
+    assert!(json["message"].as_str().unwrap().contains("too short"));
+}
+
+#[tokio::test]
+async fn cast_vote_nonce_hash_not_hex() {
+    let pool = setup_db().await;
+    let te = TestElection::new();
+    seed_election(&pool, &te, "plurality").await;
+
+    let token = base64::engine::general_purpose::STANDARD.encode([0u8; 64]);
+
+    let response = cast_vote::handle(
+        &pool,
+        "test-election-1",
+        &[1],
+        "zzzz-not-hex",
+        &token,
+        Path::new("rules"),
+    )
+    .await;
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], "INVALID_TOKEN");
+    assert!(json["message"].as_str().unwrap().contains("hex"));
+}
+
+#[tokio::test]
+async fn cast_vote_unknown_rules() {
+    let pool = setup_db().await;
+    let te = TestElection::new();
+    // Election points at a rules file that does not exist on disk.
+    seed_election(&pool, &te, "no-such-rules").await;
+    seed_candidates(&pool, "test-election-1", &[1, 2]).await;
+
+    let (h_n, token) = create_valid_token(&te.pk_b64, &te.sk_b64);
+
+    let response = cast_vote::handle(
+        &pool,
+        "test-election-1",
+        &[1],
+        &h_n,
+        &token,
+        Path::new("rules"),
+    )
+    .await;
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], "UNKNOWN_RULES");
+}
+
+#[tokio::test]
+async fn cast_vote_internal_error_on_db_failure() {
+    let pool = setup_db().await;
+    pool.close().await;
+
+    let response = cast_vote::handle(
+        &pool,
+        "test-election-1",
+        &[1],
+        "deadbeef",
+        "irrelevant",
+        Path::new("rules"),
+    )
+    .await;
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], "INTERNAL_ERROR");
+}
+
+#[tokio::test]
 async fn cast_vote_invalid_candidate() {
     let pool = setup_db().await;
     let te = TestElection::new();
@@ -330,4 +488,30 @@ async fn cast_vote_invalid_candidate() {
     let json = serde_json::to_value(&response).unwrap();
     assert_eq!(json["status"], "error");
     assert_eq!(json["code"], "INVALID_CANDIDATE");
+}
+
+/// A database error whose message happens to contain ": " must NOT leak to the
+/// voter as a protocol code — it maps to INTERNAL_ERROR.
+#[tokio::test]
+async fn cast_vote_db_error_with_colon_is_not_leaked() {
+    // Pool without migrations: "no such table" errors have "code: message" shape.
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+
+    let response = cast_vote::handle(
+        &pool,
+        "test-election-1",
+        &[1],
+        "deadbeef",
+        "irrelevant",
+        Path::new("rules"),
+    )
+    .await;
+
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], "INTERNAL_ERROR");
 }

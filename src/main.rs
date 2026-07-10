@@ -91,23 +91,7 @@ async fn main() -> Result<()> {
              anyone who can reach this port can administer elections"
         );
     }
-    let auth_interceptor =
-        move |req: tonic::Request<()>| -> Result<tonic::Request<()>, tonic::Status> {
-            if let Some(expected) = expected_auth {
-                let provided = req
-                    .metadata()
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("");
-                let provided_hash: [u8; 32] = Sha256::digest(provided.as_bytes()).into();
-                if provided_hash != expected {
-                    return Err(tonic::Status::unauthenticated(
-                        "invalid or missing admin token",
-                    ));
-                }
-            }
-            Ok(req)
-        };
+    let auth_interceptor = make_auth_interceptor(expected_auth);
 
     let grpc_handle = tokio::spawn(
         tonic::transport::Server::builder()
@@ -166,4 +150,93 @@ fn init_tracing(log_level: &str) {
         .with_target(false)
         .compact()
         .init();
+}
+
+/// Build the gRPC interceptor enforcing admin auth via [`check_auth`].
+fn make_auth_interceptor(
+    expected: Option<[u8; 32]>,
+) -> impl Fn(tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> + Clone {
+    move |req: tonic::Request<()>| {
+        check_auth(&expected, &req)?;
+        Ok(req)
+    }
+}
+
+/// Enforce gRPC admin auth: when `expected` is set, the request must carry an
+/// `authorization` header whose SHA-256 digest matches. `None` disables auth.
+fn check_auth(expected: &Option<[u8; 32]>, req: &tonic::Request<()>) -> Result<(), tonic::Status> {
+    if let Some(expected) = expected {
+        let provided = req
+            .metadata()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let provided_hash: [u8; 32] = Sha256::digest(provided.as_bytes()).into();
+        if provided_hash != *expected {
+            return Err(tonic::Status::unauthenticated(
+                "invalid or missing admin token",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn digest_of(header: &str) -> [u8; 32] {
+        Sha256::digest(header.as_bytes()).into()
+    }
+
+    #[test]
+    fn check_auth_allows_everything_when_disabled() {
+        assert!(check_auth(&None, &tonic::Request::new(())).is_ok());
+    }
+
+    #[test]
+    fn check_auth_rejects_missing_header() {
+        let expected = Some(digest_of("Bearer secret"));
+        let status = check_auth(&expected, &tonic::Request::new(())).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn check_auth_rejects_wrong_token() {
+        let expected = Some(digest_of("Bearer secret"));
+        let mut req = tonic::Request::new(());
+        req.metadata_mut()
+            .insert("authorization", "Bearer wrong".parse().unwrap());
+        let status = check_auth(&expected, &req).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn check_auth_accepts_correct_token() {
+        let expected = Some(digest_of("Bearer secret"));
+        let mut req = tonic::Request::new(());
+        req.metadata_mut()
+            .insert("authorization", "Bearer secret".parse().unwrap());
+        assert!(check_auth(&expected, &req).is_ok());
+    }
+
+    #[test]
+    fn auth_interceptor_wraps_check_auth() {
+        let interceptor = make_auth_interceptor(Some(digest_of("Bearer secret")));
+
+        let mut req = tonic::Request::new(());
+        req.metadata_mut()
+            .insert("authorization", "Bearer secret".parse().unwrap());
+        assert!(interceptor(req).is_ok());
+
+        let denied = interceptor(tonic::Request::new(()));
+        assert_eq!(denied.unwrap_err().code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn init_tracing_installs_global_subscriber() {
+        // Can only run once per process; a second init would panic, which is
+        // why this is the single test that touches it.
+        init_tracing("debug");
+    }
 }
