@@ -52,6 +52,15 @@ NOSTR_PRIVATE_KEY=your_hex_nostr_private_key_here
 
 The Nostr private key is the EC's identity on the network. Generate one with any Nostr key tool or use `openssl rand -hex 32` for testing.
 
+> **Do I need to generate RSA keys?** No. The EC uses **two independent key systems**, and you only supply the first:
+>
+> | Key | Scope | Where it comes from | Purpose |
+> |---|---|---|---|
+> | **Nostr key** | One, for the whole daemon | You provide it via `NOSTR_PRIVATE_KEY` | The EC's identity on the Nostr network; encrypts/signs NIP-59 Gift Wrap messages to voters |
+> | **RSA keypair** | One **per election** | Generated automatically on `AddElection` | Blind-signs anonymous voting tokens (RFC 9474) |
+>
+> The per-election RSA keypair is created for you inside the `AddElection` call (`crypto::generate_keypair`, 2048-bit): the **public** key is published in the Kind 35000 announcement so voters can blind their nonces, and the **private** key is stored (wrapped in `SecretString`) to blind-sign tokens. You never generate, configure, or handle RSA keys manually — it all happens per election in the daemon.
+
 Non-secret configuration lives in `ec.toml` (already included in the repo):
 
 ```toml
