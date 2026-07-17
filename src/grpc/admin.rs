@@ -6,12 +6,12 @@ use tonic::{Request, Response, Status};
 
 use crate::grpc::proto::admin_server::Admin;
 use crate::grpc::proto::{
-    AddCandidateRequest, AddElectionRequest, CandidateResponse, ElectionIdRequest,
-    ElectionListResponse, ElectionResponse, Empty, GenerateTokensRequest, StatusResponse,
-    TokenInfo, TokenListResponse, TokensResponse,
+    AddCandidateRequest, AddElectionRequest, CandidateInfo, CandidateResponse, CandidateTally,
+    ElectionIdRequest, ElectionListResponse, ElectionResponse, Empty, GenerateTokensRequest,
+    ResultsResponse, StatusResponse, TokenInfo, TokenListResponse, TokensResponse,
 };
 use crate::types::{Candidate, Election};
-use crate::{crypto, db, nostr, rules};
+use crate::{counting, crypto, db, nostr, rules};
 
 pub struct AdminService {
     pool: SqlitePool,
@@ -30,6 +30,23 @@ impl AdminService {
 }
 
 fn election_to_response(e: &Election) -> ElectionResponse {
+    election_to_response_with_candidates(e, &[])
+}
+
+fn candidate_infos(candidates: &[Candidate]) -> Vec<CandidateInfo> {
+    candidates
+        .iter()
+        .map(|c| CandidateInfo {
+            id: c.id as u32,
+            name: c.name.clone(),
+        })
+        .collect()
+}
+
+fn election_to_response_with_candidates(
+    e: &Election,
+    candidates: &[Candidate],
+) -> ElectionResponse {
     ElectionResponse {
         id: e.id.clone(),
         name: e.name.clone(),
@@ -39,6 +56,7 @@ fn election_to_response(e: &Election) -> ElectionResponse {
         rules_id: e.rules_id.clone(),
         rsa_pub_key: e.rsa_pub_key.clone(),
         created_at: e.created_at,
+        candidates: candidate_infos(candidates),
     }
 }
 
@@ -243,7 +261,14 @@ impl Admin for AdminService {
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("Election not found"))?;
 
-        Ok(Response::new(election_to_response(&election)))
+        let candidates = db::get_candidates_for_election(&self.pool, election_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(election_to_response_with_candidates(
+            &election,
+            &candidates,
+        )))
     }
 
     async fn list_elections(
@@ -354,6 +379,73 @@ impl Admin for AdminService {
 
         Ok(Response::new(TokenListResponse {
             tokens: token_infos,
+        }))
+    }
+
+    async fn get_results(
+        &self,
+        request: Request<ElectionIdRequest>,
+    ) -> Result<Response<ResultsResponse>, Status> {
+        let election_id = &request.into_inner().election_id;
+
+        let election = db::get_election(&self.pool, election_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("Election not found"))?;
+
+        // Results are only exposed once the election has finished and been
+        // counted — never mid-election, to avoid influencing live voters.
+        if election.status != "finished" {
+            return Ok(Response::new(ResultsResponse {
+                available: false,
+                status: election.status,
+                tally: Vec::new(),
+                elected: Vec::new(),
+            }));
+        }
+
+        // Recompute the tally on demand from stored ballots. This mirrors the
+        // scheduler's counting and exposes ONLY aggregates — never a link
+        // between a ballot and a voter (Critical Rule #1).
+        let rules = rules::load_rules(&election.rules_id, &self.rules_dir)
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let algorithm = counting::algorithm_for(&election.rules_id)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let votes = db::get_votes_for_election(&self.pool, election_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let ballots: Vec<counting::Ballot> = votes
+            .iter()
+            .map(|v| serde_json::from_str(&v.candidate_ids))
+            .collect::<Result<_, _>>()
+            .map_err(|e| Status::internal(format!("Corrupt ballot data: {e}")))?;
+
+        let candidates = db::get_candidates_for_election(&self.pool, election_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let candidate_ids: Vec<u8> = candidates.iter().map(|c| c.id).collect();
+
+        let result = algorithm
+            .count(&ballots, &candidate_ids, &rules)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let tally = result
+            .tally
+            .iter()
+            .map(|t| CandidateTally {
+                candidate_id: t.candidate_id as u32,
+                votes: t.votes,
+                status: t.status.as_str().to_string(),
+            })
+            .collect();
+        let elected = result.elected.iter().map(|id| *id as u32).collect();
+
+        Ok(Response::new(ResultsResponse {
+            available: true,
+            status: election.status,
+            tally,
+            elected,
         }))
     }
 }
