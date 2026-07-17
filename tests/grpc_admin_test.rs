@@ -17,7 +17,7 @@ use ec::grpc::proto::admin_server::Admin;
 use ec::grpc::proto::{
     AddCandidateRequest, AddElectionRequest, ElectionIdRequest, Empty, GenerateTokensRequest,
 };
-use ec::types::Election;
+use ec::types::{Candidate, Election, Vote};
 
 async fn setup_pool() -> SqlitePool {
     common::init_tracing();
@@ -569,4 +569,165 @@ async fn token_operations_fail_internally_when_table_is_gone() {
         .await
         .expect_err("missing table must fail");
     assert_eq!(status.code(), tonic::Code::Internal);
+}
+
+// --- GetElection candidates (issue #16) ---
+
+#[tokio::test]
+async fn get_election_includes_candidates() {
+    let pool = setup_pool().await;
+    let svc = service(&pool, offline_client());
+    seed_election(&pool, "e-cands", "open").await;
+
+    for (id, name) in [(1_u8, "Alice"), (2, "Bob")] {
+        db::add_candidate(
+            &pool,
+            &Candidate {
+                id,
+                election_id: "e-cands".to_string(),
+                name: name.to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let resp = svc
+        .get_election(Request::new(ElectionIdRequest {
+            election_id: "e-cands".to_string(),
+        }))
+        .await
+        .expect("get_election must succeed")
+        .into_inner();
+
+    assert_eq!(resp.candidates.len(), 2);
+    assert_eq!(resp.candidates[0].id, 1);
+    assert_eq!(resp.candidates[0].name, "Alice");
+    assert_eq!(resp.candidates[1].name, "Bob");
+}
+
+// --- GetResults (issue #16) ---
+
+async fn insert_vote(pool: &SqlitePool, election_id: &str, candidate_ids: &str) {
+    let mut tx = pool.begin().await.unwrap();
+    db::insert_vote_tx(
+        &mut tx,
+        &Vote {
+            id: 0,
+            election_id: election_id.to_string(),
+            candidate_ids: candidate_ids.to_string(),
+            recorded_at: 0,
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn get_results_unavailable_before_finished() {
+    let pool = setup_pool().await;
+    let svc = service(&pool, offline_client());
+    seed_election(&pool, "e-open", "open").await;
+
+    let resp = svc
+        .get_results(Request::new(ElectionIdRequest {
+            election_id: "e-open".to_string(),
+        }))
+        .await
+        .expect("get_results must succeed")
+        .into_inner();
+
+    assert!(!resp.available);
+    assert_eq!(resp.status, "open");
+    assert!(resp.tally.is_empty());
+    assert!(resp.elected.is_empty());
+}
+
+#[tokio::test]
+async fn get_results_returns_tally_when_finished() {
+    let pool = setup_pool().await;
+    let svc = service(&pool, offline_client());
+    seed_election(&pool, "e-done", "finished").await;
+
+    for (id, name) in [(1_u8, "Alice"), (2, "Bob")] {
+        db::add_candidate(
+            &pool,
+            &Candidate {
+                id,
+                election_id: "e-done".to_string(),
+                name: name.to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    // Alice: 2 votes, Bob: 1 vote (plurality, single seat -> Alice elected).
+    insert_vote(&pool, "e-done", "[1]").await;
+    insert_vote(&pool, "e-done", "[1]").await;
+    insert_vote(&pool, "e-done", "[2]").await;
+
+    let resp = svc
+        .get_results(Request::new(ElectionIdRequest {
+            election_id: "e-done".to_string(),
+        }))
+        .await
+        .expect("get_results must succeed")
+        .into_inner();
+
+    assert!(resp.available);
+    assert_eq!(resp.status, "finished");
+    assert_eq!(resp.elected, vec![1]);
+
+    let alice = resp
+        .tally
+        .iter()
+        .find(|t| t.candidate_id == 1)
+        .expect("Alice must be in the tally");
+    assert_eq!(alice.votes, 2.0);
+    assert_eq!(alice.status, "elected");
+}
+
+#[tokio::test]
+async fn get_results_rejects_unknown_election() {
+    let pool = setup_pool().await;
+    let svc = service(&pool, offline_client());
+
+    let status = svc
+        .get_results(Request::new(ElectionIdRequest {
+            election_id: "nope".to_string(),
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(status.code(), tonic::Code::NotFound);
+}
+
+#[tokio::test]
+async fn get_results_reports_corrupt_ballot_as_internal() {
+    let pool = setup_pool().await;
+    let svc = service(&pool, offline_client());
+    seed_election(&pool, "e-corrupt", "finished").await;
+    db::add_candidate(
+        &pool,
+        &Candidate {
+            id: 1,
+            election_id: "e-corrupt".to_string(),
+            name: "Alice".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    // A ballot that is not a valid JSON array of candidate ids.
+    insert_vote(&pool, "e-corrupt", "not-json").await;
+
+    let status = svc
+        .get_results(Request::new(ElectionIdRequest {
+            election_id: "e-corrupt".to_string(),
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(status.code(), tonic::Code::Internal);
+    assert!(status.message().contains("Corrupt ballot"));
 }

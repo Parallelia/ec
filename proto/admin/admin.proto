@@ -9,6 +9,7 @@ service Admin {
   rpc ListElections (Empty) returns (ElectionListResponse);
   rpc GenerateRegistrationTokens (GenerateTokensRequest) returns (TokensResponse);
   rpc ListRegistrationTokens (ElectionIdRequest) returns (TokenListResponse);
+  rpc GetResults (ElectionIdRequest) returns (ResultsResponse);
 }
 
 message Empty {}
@@ -35,6 +36,12 @@ message GenerateTokensRequest {
   uint32 count = 2;
 }
 
+// A candidate's public id and name (aggregate metadata only).
+message CandidateInfo {
+  uint32 id = 1;
+  string name = 2;
+}
+
 message ElectionResponse {
   string id = 1;
   string name = 2;
@@ -44,6 +51,9 @@ message ElectionResponse {
   string rules_id = 6;
   string rsa_pub_key = 7;
   int64 created_at = 8;
+  // Candidates registered for this election. Populated by GetElection;
+  // may be empty in other responses (e.g. ListElections) for efficiency.
+  repeated CandidateInfo candidates = 9;
 }
 
 message CandidateResponse {
@@ -72,4 +82,22 @@ message TokenListResponse {
 message TokenInfo {
   string token_id = 1;
   bool used = 2;
+}
+
+// Aggregate vote total for a single candidate. Never linked to any voter.
+message CandidateTally {
+  uint32 candidate_id = 1;
+  // Votes can be fractional under transfer-based rules (e.g. STV).
+  double votes = 2;
+  // "active" | "elected" | "excluded".
+  string status = 3;
+}
+
+// Aggregate results for an election. `available` is false until the election
+// has finished and been counted. Exposes tallies only — no vote↔voter linkage.
+message ResultsResponse {
+  bool available = 1;
+  string status = 2;
+  repeated CandidateTally tally = 3;
+  repeated uint32 elected = 4;
 }
