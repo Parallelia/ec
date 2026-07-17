@@ -1,13 +1,17 @@
 //! Coverage of hybrid configuration loading (ec.toml + env vars).
 //!
-//! Env vars are process-global, so every test grabs a shared mutex and
-//! restores a clean slate before calling `Config::load()`. Integration test
-//! binaries run one at a time, so no other test file races on the
-//! environment.
+//! Env vars and the working directory are process-global, so every test grabs
+//! a shared mutex and runs in a fresh temp directory that holds only a copy of
+//! the repository `ec.toml`. This isolates `Config::load()` from the
+//! developer's local `.env` (which `dotenvy` would otherwise inject, and which
+//! lives in the crate root) and from any real env vars. Integration test
+//! binaries run one at a time, so no other test file races on the environment.
 
+use std::fs;
 use std::sync::Mutex;
 
 use secrecy::ExposeSecret;
+use tempfile::TempDir;
 
 use ec::config::Config;
 
@@ -25,7 +29,19 @@ const ALL_VARS: &[&str] = &[
 ];
 
 fn with_env(vars: &[(&str, &str)], test: impl FnOnce()) {
-    let _guard = ENV_LOCK.lock().unwrap();
+    // Recover from a poisoned lock so a failure in one test does not mask the
+    // real cause by surfacing as `PoisonError` in every test that follows.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Copy the repository ec.toml into an isolated temp dir that has no `.env`
+    // in any ancestor, so `Config::load()` sees exactly the state we set up.
+    let ec_toml = fs::read_to_string("ec.toml").expect("repository ec.toml must exist");
+    let tmp = TempDir::new().expect("create temp dir");
+    fs::write(tmp.path().join("ec.toml"), ec_toml).expect("write temp ec.toml");
+
+    let original_dir = std::env::current_dir().expect("read cwd");
+    std::env::set_current_dir(tmp.path()).expect("enter temp dir");
+
     for var in ALL_VARS {
         // SAFETY: all env mutation in this binary is serialized by ENV_LOCK.
         unsafe { std::env::remove_var(var) };
@@ -33,9 +49,18 @@ fn with_env(vars: &[(&str, &str)], test: impl FnOnce()) {
     for (key, value) in vars {
         unsafe { std::env::set_var(key, value) };
     }
-    test();
+
+    // Catch panics so the working directory and env are always restored, even
+    // when an assertion fails; then re-raise for the test harness to report.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
+
     for var in ALL_VARS {
         unsafe { std::env::remove_var(var) };
+    }
+    std::env::set_current_dir(&original_dir).expect("restore cwd");
+
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
     }
 }
 
