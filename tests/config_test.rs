@@ -26,16 +26,29 @@ const ALL_VARS: &[&str] = &[
     "NOSTR_PRIVATE_KEY",
     "EC_DB_PASSWORD",
     "EC_ADMIN_TOKEN",
+    "TLS_CERT",
+    "TLS_KEY",
 ];
 
 fn with_env(vars: &[(&str, &str)], test: impl FnOnce()) {
+    with_env_and_toml(vars, "", test);
+}
+
+/// Like [`with_env`], but appends `toml_append` to the copied `ec.toml` so a
+/// test can exercise keys the repository config does not set.
+fn with_env_and_toml(vars: &[(&str, &str)], toml_append: &str, test: impl FnOnce()) {
     // Recover from a poisoned lock so a failure in one test does not mask the
     // real cause by surfacing as `PoisonError` in every test that follows.
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     // Copy the repository ec.toml into an isolated temp dir that has no `.env`
     // in any ancestor, so `Config::load()` sees exactly the state we set up.
-    let ec_toml = fs::read_to_string("ec.toml").expect("repository ec.toml must exist");
+    let mut ec_toml = fs::read_to_string("ec.toml").expect("repository ec.toml must exist");
+    if !toml_append.is_empty() {
+        ec_toml.push('\n');
+        ec_toml.push_str(toml_append);
+        ec_toml.push('\n');
+    }
     let tmp = TempDir::new().expect("create temp dir");
     fs::write(tmp.path().join("ec.toml"), ec_toml).expect("write temp ec.toml");
 
@@ -157,6 +170,106 @@ fn empty_admin_token_is_treated_as_unset() {
         || {
             let config = Config::load().expect("load must succeed");
             assert!(config.admin_token.is_none());
+        },
+    );
+}
+
+#[test]
+fn tls_is_disabled_by_default() {
+    with_env(&[("NOSTR_PRIVATE_KEY", "nsec-test")], || {
+        let config = Config::load().expect("load must succeed");
+        assert!(config.grpc_tls.is_none());
+    });
+}
+
+#[test]
+fn tls_paths_load_from_env() {
+    with_env(
+        &[
+            ("NOSTR_PRIVATE_KEY", "nsec-test"),
+            ("TLS_CERT", "/etc/ec/cert.pem"),
+            ("TLS_KEY", "/etc/ec/key.pem"),
+        ],
+        || {
+            let config = Config::load().expect("load must succeed");
+            let tls = config.grpc_tls.expect("tls must be configured");
+            assert_eq!(tls.cert, std::path::PathBuf::from("/etc/ec/cert.pem"));
+            assert_eq!(tls.key, std::path::PathBuf::from("/etc/ec/key.pem"));
+        },
+    );
+}
+
+#[test]
+fn tls_paths_load_from_ec_toml() {
+    with_env_and_toml(
+        &[("NOSTR_PRIVATE_KEY", "nsec-test")],
+        "tls_cert = \"./cert.pem\"\ntls_key = \"./key.pem\"",
+        || {
+            let config = Config::load().expect("load must succeed");
+            let tls = config.grpc_tls.expect("tls must be configured");
+            assert_eq!(tls.cert, std::path::PathBuf::from("./cert.pem"));
+            assert_eq!(tls.key, std::path::PathBuf::from("./key.pem"));
+        },
+    );
+}
+
+#[test]
+fn tls_env_overrides_ec_toml() {
+    with_env_and_toml(
+        &[
+            ("NOSTR_PRIVATE_KEY", "nsec-test"),
+            ("TLS_CERT", "/env/cert.pem"),
+            ("TLS_KEY", "/env/key.pem"),
+        ],
+        "tls_cert = \"./toml-cert.pem\"\ntls_key = \"./toml-key.pem\"",
+        || {
+            let config = Config::load().expect("load must succeed");
+            let tls = config.grpc_tls.expect("tls must be configured");
+            assert_eq!(tls.cert, std::path::PathBuf::from("/env/cert.pem"));
+            assert_eq!(tls.key, std::path::PathBuf::from("/env/key.pem"));
+        },
+    );
+}
+
+#[test]
+fn tls_cert_without_key_fails() {
+    with_env(
+        &[
+            ("NOSTR_PRIVATE_KEY", "nsec-test"),
+            ("TLS_CERT", "/etc/ec/cert.pem"),
+        ],
+        || {
+            let err = Config::load().expect_err("cert without key must fail");
+            assert!(err.to_string().contains("tls_key"), "got: {err}");
+        },
+    );
+}
+
+#[test]
+fn tls_key_without_cert_fails() {
+    with_env(
+        &[
+            ("NOSTR_PRIVATE_KEY", "nsec-test"),
+            ("TLS_KEY", "/etc/ec/key.pem"),
+        ],
+        || {
+            let err = Config::load().expect_err("key without cert must fail");
+            assert!(err.to_string().contains("tls_cert"), "got: {err}");
+        },
+    );
+}
+
+#[test]
+fn empty_tls_env_vars_are_treated_as_unset() {
+    with_env(
+        &[
+            ("NOSTR_PRIVATE_KEY", "nsec-test"),
+            ("TLS_CERT", ""),
+            ("TLS_KEY", ""),
+        ],
+        || {
+            let config = Config::load().expect("load must succeed");
+            assert!(config.grpc_tls.is_none());
         },
     );
 }

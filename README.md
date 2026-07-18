@@ -69,7 +69,16 @@ grpc_bind  = "127.0.0.1:50051"
 rules_dir  = "./rules"
 log_level  = "info"
 db_path    = "./ec.db"
+
+# TLS for the gRPC admin API (PEM paths; set both or neither).
+# tls_cert = "./ec-cert.pem"
+# tls_key  = "./ec-key.pem"
 ```
+
+When `tls_cert`/`tls_key` are set, the gRPC admin API serves TLS with that
+certificate; plaintext clients are rejected. When unset, the API is plaintext —
+keep `grpc_bind` on loopback in that case, or the admin token and generated
+registration tokens cross the network unencrypted (the daemon logs a warning).
 
 ### Run
 
@@ -394,6 +403,8 @@ Environment variable  >  ec.toml  >  Hardcoded default
 | `RULES_DIR` | No | Overrides `rules_dir` from `ec.toml` |
 | `LOG_LEVEL` | No | Overrides `log_level` from `ec.toml` |
 | `DATABASE_URL` | No | Overrides `db_path` from `ec.toml` |
+| `TLS_CERT` | No | Overrides `tls_cert` from `ec.toml` (PEM certificate for the gRPC admin API; requires `TLS_KEY`) |
+| `TLS_KEY` | No | Overrides `tls_key` from `ec.toml` (PEM private key for the gRPC admin API; requires `TLS_CERT`) |
 
 Secrets are **never** stored in `ec.toml`. They are loaded from environment variables only and kept in memory as `SecretString`.
 
