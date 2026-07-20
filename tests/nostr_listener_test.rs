@@ -39,6 +39,7 @@ fn test_config(relay_url: &str) -> Config {
         db_path: "sqlite::memory:".to_string(),
         nostr_private_key: SecretString::new("unused".into()),
         db_password: None,
+        grpc_tls: None,
         admin_token: None,
     }
 }

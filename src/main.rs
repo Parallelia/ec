@@ -84,17 +84,37 @@ async fn main() -> Result<()> {
         .admin_token
         .as_ref()
         .map(|t| Sha256::digest(format!("Bearer {}", t.expose_secret()).as_bytes()).into());
-    if expected_auth.is_none() && !grpc_addr.ip().is_loopback() {
-        tracing::warn!(
-            grpc_bind = %state.config.grpc_bind,
-            "gRPC admin API is bound to a non-loopback address WITHOUT EC_ADMIN_TOKEN — \
-             anyone who can reach this port can administer elections"
-        );
+    if !grpc_addr.ip().is_loopback() {
+        if expected_auth.is_none() {
+            tracing::warn!(
+                grpc_bind = %state.config.grpc_bind,
+                "gRPC admin API is bound to a non-loopback address WITHOUT EC_ADMIN_TOKEN — \
+                 anyone who can reach this port can administer elections"
+            );
+        }
+        if state.config.grpc_tls.is_none() {
+            tracing::warn!(
+                grpc_bind = %state.config.grpc_bind,
+                "gRPC admin API is bound to a non-loopback address WITHOUT TLS — \
+                 the admin token and generated registration tokens cross the network in \
+                 cleartext; set tls_cert/tls_key in ec.toml (or TLS_CERT/TLS_KEY)"
+            );
+        }
     }
     let auth_interceptor = make_auth_interceptor(expected_auth);
 
+    let mut server_builder = tonic::transport::Server::builder();
+    if let Some(paths) = &state.config.grpc_tls {
+        let identity = ec::grpc::tls::load_identity(paths)?;
+        server_builder = server_builder
+            .tls_config(tonic::transport::server::ServerTlsConfig::new().identity(identity))?;
+        tracing::info!(
+            cert = %paths.cert.display(),
+            "gRPC admin API TLS enabled"
+        );
+    }
     let grpc_handle = tokio::spawn(
-        tonic::transport::Server::builder()
+        server_builder
             .add_service(
                 ec::grpc::proto::admin_server::AdminServer::with_interceptor(
                     admin_service,

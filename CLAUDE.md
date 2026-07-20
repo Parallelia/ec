@@ -43,7 +43,7 @@ Measured with `cargo-llvm-cov` (install: `rustup component add llvm-tools-previe
 Single Rust binary (`src/main.rs`) with three concurrent surfaces:
 
 - **Nostr listener/publisher** — voter communication via NIP-59 Gift Wrap (nostr-sdk 0.44.1)
-- **gRPC admin API** — operator interface (tonic 0.14.5, proto at `proto/admin/admin.proto`, optional bearer auth via `EC_ADMIN_TOKEN`)
+- **gRPC admin API** — operator interface (tonic 0.14.5, proto at `proto/admin/admin.proto`, optional bearer auth via `EC_ADMIN_TOKEN`, optional TLS via `tls_cert`/`tls_key` in `ec.toml` or `TLS_CERT`/`TLS_KEY`)
 - **Scheduler** — drives election state transitions and counting
 
 ### Module Layout (`src/`)

@@ -7,3 +7,9 @@ rules_dir  = "./rules"
 log_level  = "info"
 db_path    = "./ec.db"
 
+# TLS for the gRPC admin API (PEM paths; set both or neither).
+# Required before binding grpc_bind to anything beyond loopback — without it
+# the admin token and generated registration tokens cross the wire in cleartext.
+# tls_cert = "./ec-cert.pem"
+# tls_key  = "./ec-key.pem"
+

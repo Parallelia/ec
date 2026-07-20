@@ -1,9 +1,16 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use secrecy::SecretString;
 use serde::Deserialize;
+
+/// PEM certificate/key pair enabling TLS on the gRPC admin API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsPaths {
+    pub cert: PathBuf,
+    pub key: PathBuf,
+}
 
 /// Hybrid configuration loaded from `ec.toml` (non-secrets) plus env vars (secrets & overrides).
 #[derive(Debug, Clone)]
@@ -14,6 +21,8 @@ pub struct Config {
     pub rules_dir: PathBuf,
     pub log_level: String,
     pub db_path: String,
+    /// TLS for the gRPC admin API; `None` serves plaintext (loopback only!).
+    pub grpc_tls: Option<TlsPaths>,
 
     // --- From env vars (secrets) ---
     pub nostr_private_key: SecretString,
@@ -29,6 +38,8 @@ struct FileConfig {
     rules_dir: String,
     log_level: String,
     db_path: String,
+    tls_cert: Option<String>,
+    tls_key: Option<String>,
 }
 
 impl Default for FileConfig {
@@ -39,7 +50,25 @@ impl Default for FileConfig {
             rules_dir: "./rules".to_string(),
             log_level: "info".to_string(),
             db_path: "./ec.db".to_string(),
+            tls_cert: None,
+            tls_key: None,
         }
+    }
+}
+
+/// Combine the optional cert/key settings into a validated pair.
+///
+/// Setting only one of the two is a configuration mistake that would silently
+/// serve plaintext, so it is rejected rather than ignored.
+fn resolve_tls(cert: Option<String>, key: Option<String>) -> Result<Option<TlsPaths>> {
+    match (cert, key) {
+        (Some(cert), Some(key)) => Ok(Some(TlsPaths {
+            cert: PathBuf::from(cert),
+            key: PathBuf::from(key),
+        })),
+        (None, None) => Ok(None),
+        (Some(_), None) => bail!("tls_cert is set but tls_key is not — both are required for TLS"),
+        (None, Some(_)) => bail!("tls_key is set but tls_cert is not — both are required for TLS"),
     }
 }
 
@@ -68,6 +97,16 @@ impl Config {
             format!("sqlite:{db_path}")
         };
 
+        let tls_cert = std::env::var("TLS_CERT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| file_config.tls_cert.clone());
+        let tls_key = std::env::var("TLS_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| file_config.tls_key.clone());
+        let grpc_tls = resolve_tls(tls_cert, tls_key)?;
+
         let nostr_private_key = SecretString::new(
             std::env::var("NOSTR_PRIVATE_KEY")
                 .context("NOSTR_PRIVATE_KEY env var is required")?
@@ -87,6 +126,7 @@ impl Config {
             rules_dir,
             log_level,
             db_path,
+            grpc_tls,
             nostr_private_key,
             db_password,
             admin_token,
