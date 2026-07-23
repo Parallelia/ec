@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+
 use anyhow::{Context, Result};
 use nostr_sdk::prelude::*;
 use serde_json::json;
@@ -10,6 +13,49 @@ const ELECTION_EVENT_KIND: u16 = 35_000;
 
 /// Nostr event kind for election results / live tally updates.
 const RESULT_EVENT_KIND: u16 = 35_001;
+
+/// Last `created_at` published per addressable coordinate (kind + `d` tag).
+///
+/// Relays keep a single version of an addressable event and, per NIP-01, break
+/// ties on equal `created_at` by retaining the *lowest event id* — the others
+/// are dropped and never relayed. Both kinds here are republished in bursts
+/// (once per `AddCandidate`, once per tally update), which routinely lands
+/// several versions inside the same wall-clock second, leaving the relay with
+/// an arbitrary — often incomplete — version.
+///
+/// One `u64` per election; the map is never pruned because its size is bounded
+/// by the number of elections the daemon publishes.
+static LAST_PUBLISHED_AT: LazyLock<Mutex<HashMap<(u16, String), u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Timestamp for the next publish of `kind`/`identifier`: the current time, or
+/// one second past the previous publish when they would collide.
+///
+/// The `last + 1` path can push `created_at` ahead of wall time, bounded by the
+/// number of republishes that land in the same second — a handful, since each
+/// one is a serial gRPC call plus a relay round-trip. On restart the in-memory
+/// map is lost, so a later republish for the same coordinate reverts to real
+/// `now`; if that happens while `now` is still behind a future-dated event on
+/// the relay, NIP-01 keeps the older content until wall time catches up. We
+/// accept this: the skew is only seconds and self-heals, whereas closing it
+/// fully would mean a relay fetch to reseed every cold coordinate.
+fn next_created_at(kind: u16, identifier: &str) -> Timestamp {
+    let now = Timestamp::now().as_secs();
+    // A poisoned lock only means another publish panicked; the map itself is
+    // still consistent, so recover instead of failing the publish.
+    let mut last_published = LAST_PUBLISHED_AT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let key = (kind, identifier.to_string());
+    let created_at = match last_published.get(&key) {
+        Some(&last) if last >= now => last + 1,
+        _ => now,
+    };
+    last_published.insert(key, created_at);
+
+    Timestamp::from_secs(created_at)
+}
 
 /// Publish (or replace) the election announcement event (Kind 35000).
 ///
@@ -36,7 +82,8 @@ pub async fn publish_election_event(
     });
 
     let builder = EventBuilder::new(Kind::Custom(ELECTION_EVENT_KIND), content.to_string())
-        .tag(Tag::identifier(&election.id));
+        .tag(Tag::identifier(&election.id))
+        .custom_created_at(next_created_at(ELECTION_EVENT_KIND, &election.id));
 
     let output = client
         .send_event_builder(builder)
@@ -109,7 +156,8 @@ pub async fn publish_result_event(
     }
 
     let builder = EventBuilder::new(Kind::Custom(RESULT_EVENT_KIND), content.to_string())
-        .tag(Tag::identifier(&election.id));
+        .tag(Tag::identifier(&election.id))
+        .custom_created_at(next_created_at(RESULT_EVENT_KIND, &election.id));
 
     let output = client
         .send_event_builder(builder)

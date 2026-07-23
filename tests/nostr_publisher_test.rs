@@ -3,7 +3,9 @@
 
 mod common;
 
-use nostr_sdk::prelude::{Client, Keys};
+use std::time::Duration;
+
+use nostr_sdk::prelude::{Client, Filter, Keys, Kind, RelayPoolNotification};
 
 use ec::counting::{CandidateStatus, CandidateTally, CountResult, CountRound};
 use ec::nostr::publisher;
@@ -57,6 +59,40 @@ async fn online_client(relay_url: &str) -> Client {
     client
 }
 
+/// Connect a client subscribed to `kind`, ready to observe what gets published.
+async fn observer(relay_url: &str, kind: Kind) -> Client {
+    let client = online_client(relay_url).await;
+    client
+        .subscribe(Filter::new().kind(kind), None)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    client
+}
+
+/// Collect the `created_at` of the next `count` events of `kind`, in arrival
+/// order. The receiver must be taken before publishing, or events are missed.
+async fn next_created_at(
+    notifications: &mut tokio::sync::broadcast::Receiver<RelayPoolNotification>,
+    kind: Kind,
+    count: usize,
+) -> Vec<u64> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut stamps = Vec::with_capacity(count);
+        while stamps.len() < count {
+            let Ok(RelayPoolNotification::Event { event, .. }) = notifications.recv().await else {
+                continue;
+            };
+            if event.kind == kind {
+                stamps.push(event.created_at.as_secs());
+            }
+        }
+        stamps
+    })
+    .await
+    .expect("relay must deliver every published event")
+}
+
 #[tokio::test]
 async fn publishes_election_announcement_with_candidates() {
     let relay_url = common::start_fake_relay().await;
@@ -96,6 +132,69 @@ async fn publishes_result_event_with_and_without_count_sheet() {
     publisher::publish_result_event(&client, &election, &make_result(true))
         .await
         .expect("publish with count sheet must succeed");
+}
+
+/// Announcements are addressable events: relays keep a single version per
+/// `d` tag and, on equal `created_at`, retain the lowest event id (NIP-01).
+/// `AddCandidate` republishes the whole announcement once per candidate, so a
+/// burst within one second would leave the relay holding an arbitrary — often
+/// incomplete — candidate list. Timestamps must be strictly increasing.
+#[tokio::test]
+async fn election_republished_in_the_same_second_gets_increasing_created_at() {
+    let relay_url = common::start_fake_relay().await;
+    let observer = observer(&relay_url, Kind::Custom(35_000)).await;
+    let client = online_client(&relay_url).await;
+    let election = make_election("e-burst");
+    let candidates: Vec<Candidate> = (1..=3)
+        .map(|id| Candidate {
+            id,
+            election_id: "e-burst".to_string(),
+            name: format!("Candidate {id}"),
+        })
+        .collect();
+    let mut notifications = observer.notifications();
+
+    // Mirrors AddCandidate: create, then republish the growing candidate list.
+    for upto in 0..3 {
+        publisher::publish_election_event(&client, &election, &candidates[..upto])
+            .await
+            .expect("publish must succeed");
+    }
+
+    let stamps = next_created_at(&mut notifications, Kind::Custom(35_000), 3).await;
+    let now = nostr_sdk::prelude::Timestamp::now().as_secs();
+    assert!(
+        stamps[0] < stamps[1] && stamps[1] < stamps[2],
+        "created_at must be strictly increasing, got {stamps:?}"
+    );
+    assert!(
+        stamps[0].abs_diff(now) < 60,
+        "first publish must use the current time, got {} vs now {now}",
+        stamps[0]
+    );
+}
+
+/// Kind 35001 is addressable too and is republished on every live tally
+/// update, so it needs the same strictly increasing timestamps.
+#[tokio::test]
+async fn result_republished_in_the_same_second_gets_increasing_created_at() {
+    let relay_url = common::start_fake_relay().await;
+    let observer = observer(&relay_url, Kind::Custom(35_001)).await;
+    let client = online_client(&relay_url).await;
+    let election = make_election("r-burst");
+    let mut notifications = observer.notifications();
+
+    for with_count_sheet in [false, true] {
+        publisher::publish_result_event(&client, &election, &make_result(with_count_sheet))
+            .await
+            .expect("publish must succeed");
+    }
+
+    let stamps = next_created_at(&mut notifications, Kind::Custom(35_001), 2).await;
+    assert!(
+        stamps[0] < stamps[1],
+        "created_at must be strictly increasing, got {stamps:?}"
+    );
 }
 
 #[tokio::test]
