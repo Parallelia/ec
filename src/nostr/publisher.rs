@@ -30,6 +30,15 @@ static LAST_PUBLISHED_AT: LazyLock<Mutex<HashMap<(u16, String), u64>>> =
 
 /// Timestamp for the next publish of `kind`/`identifier`: the current time, or
 /// one second past the previous publish when they would collide.
+///
+/// The `last + 1` path can push `created_at` ahead of wall time, bounded by the
+/// number of republishes that land in the same second — a handful, since each
+/// one is a serial gRPC call plus a relay round-trip. On restart the in-memory
+/// map is lost, so a later republish for the same coordinate reverts to real
+/// `now`; if that happens while `now` is still behind a future-dated event on
+/// the relay, NIP-01 keeps the older content until wall time catches up. We
+/// accept this: the skew is only seconds and self-heals, whereas closing it
+/// fully would mean a relay fetch to reseed every cold coordinate.
 fn next_created_at(kind: u16, identifier: &str) -> Timestamp {
     let now = Timestamp::now().as_secs();
     // A poisoned lock only means another publish panicked; the map itself is
